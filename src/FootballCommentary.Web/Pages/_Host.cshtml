@@ -1,0 +1,13 @@
+@page "/"
+@namespace FootballCommentary.Web.Pages
+@addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
+@{
+    Layout = "_Layout";
+}
+
+<component type="typeof(App)" render-mode="ServerPrerendered" />
+
+<!-- Include necessary scripts for the football game visualization -->
+<script src="~/js/football.js"></script>
+<script src="~/js/gameConnection.js"></script>
+<script src="~/js/renderGameField.js"></script> 

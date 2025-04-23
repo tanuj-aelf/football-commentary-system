@@ -1,0 +1,697 @@
+@page "/"
+@using FootballCommentary.Core.Models
+@using Microsoft.AspNetCore.SignalR.Client
+@using Microsoft.AspNetCore.Http.Connections
+@using System.Timers
+@using Microsoft.JSInterop
+@using Microsoft.AspNetCore.Components.Web
+@inject NavigationManager NavigationManager
+@inject IJSRuntime JSRuntime
+@implements IAsyncDisposable
+@implements IDisposable
+
+<PageTitle>Football Commentary System</PageTitle>
+
+<div class="container">
+    @if (!isGameCreated)
+    {
+        <div class="game-setup">
+            <h2>Game Setup</h2>
+            <div class="row mb-3">
+                <div class="col">
+                    <label for="teamA">Team A</label>
+                    <input type="text" id="teamA" class="form-control" @bind="teamA" placeholder="Manchester United" />
+                </div>
+                <div class="col">
+                    <label for="teamB">Team B</label>
+                    <input type="text" id="teamB" class="form-control" @bind="teamB" placeholder="Liverpool" />
+                </div>
+            </div>
+            <button class="btn btn-primary" @onclick="CreateGame" disabled="@isCreating">
+                @if (isCreating)
+                {
+                    <span>Creating...</span>
+                }
+                else
+                {
+                    <span>Create Game</span>
+                }
+            </button>
+        </div>
+    }
+    else
+    {
+        <div class="row">
+            <div class="col-md-8">
+                <div class="scoreboard">
+                    <div class="team-score">
+                        <span>Team A: @gameState.HomeTeam.Score</span>
+                    </div>
+                    <div class="team-score">
+                        <span>Team B: @gameState.AwayTeam.Score</span>
+                    </div>
+                </div>
+                
+                <div class="game-field">
+                    <canvas id="gameCanvas" width="600" height="400" @ref="gameCanvas"></canvas>
+                </div>
+                
+                <div class="controls">
+                    <button class="btn btn-success" @onclick="StartGame" disabled="@(gameState.Status == GameStatus.InProgress)">Start Game</button>
+                    <button class="btn btn-primary" @onclick="KickBall" disabled="@(gameState.Status != GameStatus.InProgress)">Kick Ball</button>
+                    <button class="btn btn-warning" @onclick="@(() => SimulateGoal("TeamA"))" disabled="@(gameState.Status != GameStatus.InProgress)">Goal Team A</button>
+                    <button class="btn btn-warning" @onclick="@(() => SimulateGoal("TeamB"))" disabled="@(gameState.Status != GameStatus.InProgress)">Goal Team B</button>
+                    <button class="btn btn-danger" @onclick="EndGame" disabled="@(gameState.Status != GameStatus.InProgress)">End Game</button>
+                </div>
+            </div>
+            
+            <div class="col-md-4">
+                <div class="commentary-box">
+                    <h3>Live Commentary</h3>
+                    <div class="commentary-messages">
+                        @foreach (var message in commentaryMessages.OrderByDescending(m => m.Timestamp))
+                        {
+                            <div class="commentary-message">
+                                <p>@message.Text</p>
+                                <small>@message.Timestamp.ToLocalTime().ToString("HH:mm:ss")</small>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private HubConnection? hubConnection;
+    private ElementReference gameCanvas;
+    private string teamA = "Manchester United";
+    private string teamB = "Liverpool";
+    private string gameId = "";
+    private bool isGameCreated = false;
+    private bool isCreating = false;
+    private GameState gameState = new();
+    private List<CommentaryMessage> commentaryMessages = new();
+    private Timer? gameTimer;
+    private CancellationTokenSource _connectionCts = new CancellationTokenSource();
+    private readonly int _maxRetryAttempts = 5;
+    private bool _isReconnecting = false;
+    private bool isJoining = false;
+    private bool hasJoinedGame = false;
+    private bool inLobby = true;
+    private bool disposedValue = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ConfigureHubConnection();
+    }
+
+    private void ConfigureHubHandlers()
+    {
+        if (hubConnection == null) return;
+        
+        hubConnection.On<GameState>("ReceiveGameState", async (state) =>
+        {
+            await InvokeAsync(() =>
+            {
+                gameState = state;
+                StateHasChanged();
+                
+                // Render game state on canvas
+                UpdateCanvas();
+            });
+        });
+        
+        hubConnection.On<GameState>("GameStateUpdated", async (state) =>
+        {
+            await InvokeAsync(() =>
+            {
+                try 
+                {
+                    double minutes = 0;
+                    double seconds = 0;
+                    
+                    if (state.GameTime != null)
+                    {
+                        minutes = state.GameTime.TotalMinutes;
+                        seconds = state.GameTime.TotalSeconds % 60;
+                    }
+                    
+                    Console.WriteLine($"GameStateUpdated event received. Status={state.Status}, Game Time={minutes}:{seconds:00}");
+                    
+                    // Debug player positions
+                    int playerCount = state.HomeTeam?.Players?.Count ?? 0;
+                    Console.WriteLine($"Home team player count: {playerCount}");
+                    if (state.HomeTeam?.Players != null && playerCount > 0)
+                    {
+                        var player = state.HomeTeam.Players[0];
+                        Console.WriteLine($"Home player position: x={player.Position?.X}, y={player.Position?.Y}");
+                    }
+                    
+                    if (state.Ball?.Position != null)
+                    {
+                        Console.WriteLine($"Ball position: x={state.Ball.Position.X}, y={state.Ball.Position.Y}");
+                    }
+                    
+                    // Save the updated game state
+                    gameState = state;
+                    
+                    // Update UI immediately
+                    StateHasChanged();
+                    
+                    // Force a canvas update
+                    UpdateCanvas();
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Error handling GameStateUpdated: {ex.Message}");
+                }
+            });
+        });
+        
+        hubConnection.On<CommentaryMessage>("ReceiveCommentary", async (message) =>
+        {
+            await InvokeAsync(() =>
+            {
+                Console.WriteLine($"Received commentary: {message.Text}");
+                // Add commentary message and limit to last 10
+                commentaryMessages.Insert(0, message);
+                if (commentaryMessages.Count > 10)
+                {
+                    commentaryMessages.RemoveAt(commentaryMessages.Count - 1);
+                }
+                StateHasChanged();
+            });
+        });
+        
+        hubConnection.On<List<CommentaryMessage>>("ReceiveCommentary", (messages) =>
+        {
+            commentaryMessages = messages;
+            InvokeAsync(StateHasChanged);
+        });
+
+        hubConnection.On<string, GameState>("GameCreated", async (id, state) =>
+        {
+            Console.WriteLine($"Game created event received. Game ID: {id}");
+            gameId = id;
+            gameState = state;
+            isGameCreated = true;
+            isCreating = false;
+            await InvokeAsync(async () => {
+                StateHasChanged();
+                await JoinGame();
+            });
+        });
+
+        hubConnection.On<string>("Error", (message) =>
+        {
+            Console.WriteLine($"Error: {message}");
+            isCreating = false;
+            StateHasChanged();
+        });
+    }
+
+    private async Task ConfigureHubConnection()
+    {
+        try
+        {
+            Console.WriteLine("Configuring hub connection to http://localhost:7002/gamehub");
+            
+            hubConnection = new HubConnectionBuilder()
+                .WithUrl("http://localhost:7002/gamehub", options => 
+                {
+                    // Allow both WebSockets and long polling
+                    options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
+                    // Add additional logging
+                    options.AccessTokenProvider = () => 
+                    {
+                        Console.WriteLine("AccessTokenProvider called");
+                        return Task.FromResult<string?>(null);
+                    };
+                })
+                .WithAutomaticReconnect(new[] { TimeSpan.FromSeconds(0), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10) })
+                .ConfigureLogging(logging => {
+                    logging.SetMinimumLevel(LogLevel.Debug);
+                })
+                .Build();
+            
+            Console.WriteLine("Hub connection built, setting up event handlers");
+            
+            hubConnection.Reconnecting += async (error) =>
+            {
+                _isReconnecting = true;
+                commentaryMessages.Add(new CommentaryMessage { Text = "Connection lost, attempting to reconnect...", Timestamp = DateTime.UtcNow });
+                Console.WriteLine($"Connection lost: {error?.Message}");
+                StateHasChanged();
+                await Task.CompletedTask;
+            };
+            
+            hubConnection.Reconnected += async (connectionId) =>
+            {
+                _isReconnecting = false;
+                commentaryMessages.Add(new CommentaryMessage { Text = $"Connection restored. Connection ID: {connectionId}", Timestamp = DateTime.UtcNow });
+                Console.WriteLine($"Connection restored. Connection ID: {connectionId}");
+                
+                if (!string.IsNullOrEmpty(gameId))
+                {
+                    await JoinGame();
+                }
+                
+                StateHasChanged();
+                await Task.CompletedTask;
+            };
+            
+            hubConnection.Closed += async (error) =>
+            {
+                if (error != null)
+                {
+                    commentaryMessages.Add(new CommentaryMessage { Text = $"Connection closed with error: {error.Message}", Timestamp = DateTime.UtcNow });
+                    Console.Error.WriteLine($"Connection closed with error: {error}");
+                }
+                else
+                {
+                    commentaryMessages.Add(new CommentaryMessage { Text = "Connection closed", Timestamp = DateTime.UtcNow });
+                }
+                
+                if (!disposedValue)
+                {
+                    await Task.Delay(new Random().Next(0, 5) * 1000);
+                    await StartHubConnection();
+                }
+            };
+            
+            ConfigureHubHandlers();
+            
+            Console.WriteLine("Starting hub connection");
+            await StartHubConnection();
+            Console.WriteLine($"Hub connection started. State: {hubConnection.State}");
+        }
+        catch (Exception ex)
+        {
+            commentaryMessages.Add(new CommentaryMessage { Text = $"Error configuring hub connection: {ex.Message}", Timestamp = DateTime.UtcNow });
+            Console.Error.WriteLine($"Error configuring hub connection: {ex}");
+        }
+    }
+
+    private void UpdateGameState()
+    {
+        // Update UI based on game state changes
+    }
+
+    private async Task StartHubConnection()
+    {
+        if (disposedValue)
+        {
+            Console.WriteLine("StartHubConnection called, but object is disposed");
+            return;
+        }
+            
+        if (hubConnection == null)
+        {
+            Console.WriteLine("Hub connection is null, reconfiguring");
+            await ConfigureHubConnection();
+            return;
+        }
+
+        if (hubConnection.State == HubConnectionState.Disconnected)
+        {
+            try
+            {
+                Console.WriteLine("Starting disconnected hub connection");
+                await hubConnection.StartAsync();
+                Console.WriteLine($"Hub connection started successfully. State: {hubConnection.State}");
+                commentaryMessages.Add(new CommentaryMessage { Text = "Connected to game hub", Timestamp = DateTime.UtcNow });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to start hub connection: {ex.GetType().Name} - {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner exception: {ex.InnerException.GetType().Name} - {ex.InnerException.Message}");
+                }
+                commentaryMessages.Add(new CommentaryMessage { Text = $"Connection error: {ex.Message}", Timestamp = DateTime.UtcNow });
+                Console.Error.WriteLine($"Connection error: {ex}");
+            }
+        }
+        else
+        {
+            Console.WriteLine($"Hub already in state: {hubConnection.State}, no need to start");
+        }
+    }
+
+    private async Task AttemptReconnection()
+    {
+        if (_connectionCts.IsCancellationRequested)
+            return;
+            
+        for (int attempt = 0; attempt < _maxRetryAttempts; attempt++)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)), _connectionCts.Token);
+                
+                if (_connectionCts.IsCancellationRequested)
+                    return;
+                
+                commentaryMessages.Add(new CommentaryMessage { Text = $"Attempting to reconnect... (Attempt {attempt + 1} of {_maxRetryAttempts})", Timestamp = DateTime.UtcNow });
+                StateHasChanged();
+                
+                await hubConnection.StartAsync(_connectionCts.Token);
+                
+                commentaryMessages.Add(new CommentaryMessage { Text = "Reconnected to game hub", Timestamp = DateTime.UtcNow });
+                
+                if (!string.IsNullOrEmpty(gameId))
+                {
+                    await JoinGame();
+                }
+                
+                StateHasChanged();
+                return;
+            }
+            catch (Exception ex)
+            {
+                commentaryMessages.Add(new CommentaryMessage { Text = $"Reconnection attempt {attempt + 1} failed: {ex.Message}", Timestamp = DateTime.UtcNow });
+                StateHasChanged();
+            }
+        }
+        
+        commentaryMessages.Add(new CommentaryMessage { Text = "Failed to reconnect after multiple attempts. Please refresh the page.", Timestamp = DateTime.UtcNow });
+        StateHasChanged();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            if (gameTimer == null)
+            {
+                // Create a timer that updates the UI every second
+                gameTimer = new Timer(250); // 250ms for smoother updates
+                gameTimer.Elapsed += OnTimerElapsed;
+                gameTimer.Start();
+                
+                Console.WriteLine("Game timer started");
+            }
+        }
+    }
+
+    private void OnTimerElapsed(object? sender, ElapsedEventArgs e)
+    {
+        try
+        {
+            // Only update if we're in a game, not disposed, and have data
+            if (isGameCreated && !disposedValue && gameState != null && 
+                gameState.HomeTeam?.Players != null && gameState.AwayTeam?.Players != null)
+            {
+                // This ensures UI gets updated on the UI thread
+                _ = InvokeAsync(() => {
+                    UpdateCanvas();
+                    StateHasChanged();
+                    return Task.CompletedTask;
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error in timer callback: {ex.Message}");
+        }
+    }
+
+    private async Task CreateGame()
+    {
+        if (hubConnection?.State != HubConnectionState.Connected)
+        {
+            commentaryMessages.Add(new CommentaryMessage { Text = "Unable to create game: Not connected to server", Timestamp = DateTime.UtcNow });
+            return;
+        }
+
+        try
+        {
+            isCreating = true;
+            Console.WriteLine($"Creating game between {teamA} and {teamB}");
+            
+            // Call the CreateGame method on the hub and get the game ID directly
+            gameId = await hubConnection.InvokeAsync<string>("CreateGame", teamA, teamB);
+            
+            Console.WriteLine($"Game created with ID: {gameId}");
+            isGameCreated = true;
+            isCreating = false;
+            
+            // Join the game we just created
+            await JoinGame();
+        }
+        catch (Exception ex)
+        {
+            commentaryMessages.Add(new CommentaryMessage { Text = $"Error creating game: {ex.Message}", Timestamp = DateTime.UtcNow });
+            Console.Error.WriteLine($"Error creating game: {ex}");
+            isCreating = false;
+        }
+    }
+
+    public async Task JoinGame()
+    {
+        if (string.IsNullOrWhiteSpace(gameId))
+        {
+            Console.WriteLine("JoinGame called but gameId is empty");
+            commentaryMessages.Add(new CommentaryMessage { Text = "Please enter a game ID to join.", Timestamp = DateTime.UtcNow });
+            return;
+        }
+
+        try
+        {
+            Console.WriteLine($"Attempting to join game with ID: {gameId}");
+            isJoining = true;
+            StateHasChanged();
+            
+            // Ensure connection is active before sending
+            if (hubConnection?.State != HubConnectionState.Connected)
+            {
+                Console.WriteLine($"Hub not connected. Current state: {hubConnection?.State}");
+                await StartHubConnection();
+                
+                if (hubConnection?.State != HubConnectionState.Connected)
+                {
+                    Console.WriteLine("Failed to connect hub after retry");
+                    commentaryMessages.Add(new CommentaryMessage { Text = "Cannot join game: Connection to server is not active.", Timestamp = DateTime.UtcNow });
+                    isJoining = false;
+                    StateHasChanged();
+                    return;
+                }
+            }
+            
+            Console.WriteLine($"Sending JoinGame request to hub for game ID: {gameId}");
+            await hubConnection.SendAsync("JoinGame", gameId);
+            Console.WriteLine($"JoinGame request sent successfully");
+            hasJoinedGame = true;
+            inLobby = false;
+            commentaryMessages.Clear();
+            commentaryMessages.Add(new CommentaryMessage { Text = $"Joined game {gameId}", Timestamp = DateTime.UtcNow });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error in JoinGame: {ex.Message}");
+            commentaryMessages.Add(new CommentaryMessage { Text = $"Error joining game: {ex.Message}", Timestamp = DateTime.UtcNow });
+            Console.Error.WriteLine($"Error joining game: {ex}");
+            hasJoinedGame = false;
+        }
+        finally
+        {
+            isJoining = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task StartGame()
+    {
+        if (hubConnection is not null && hubConnection.State == HubConnectionState.Connected && isGameCreated)
+        {
+            try
+            {
+                await hubConnection.SendAsync("StartGame", gameId);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error starting game: {ex.Message}");
+            }
+        }
+    }
+
+    private async Task EndGame()
+    {
+        if (hubConnection is not null && hubConnection.State == HubConnectionState.Connected && isGameCreated)
+        {
+            try
+            {
+                await hubConnection.SendAsync("EndGame", gameId);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error ending game: {ex.Message}");
+            }
+        }
+    }
+
+    private async Task KickBall()
+    {
+        if (hubConnection is not null && hubConnection.State == HubConnectionState.Connected && isGameCreated)
+        {
+            try
+            {
+                await hubConnection.SendAsync("KickBall", gameId);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error kicking ball: {ex.Message}");
+            }
+        }
+    }
+
+    private async Task SimulateGoal(string teamId)
+    {
+        if (hubConnection is not null && hubConnection.State == HubConnectionState.Connected && isGameCreated)
+        {
+            try
+            {
+                await hubConnection.SendAsync("SimulateGoal", gameId, teamId);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error simulating goal: {ex.Message}");
+            }
+        }
+    }
+
+    private async Task RenderGameField()
+    {
+        if (isGameCreated && gameCanvas.Id is not null)
+        {
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("renderGameField", gameCanvas, gameState);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error rendering game field: {ex.Message}");
+            }
+        }
+    }
+
+    public async Task LeaveGame()
+    {
+        try
+        {
+            if (hubConnection?.State == HubConnectionState.Connected)
+            {
+                await hubConnection.SendAsync("LeaveGame", gameId);
+                commentaryMessages.Add(new CommentaryMessage { Text = $"Left game {gameId}", Timestamp = DateTime.UtcNow });
+            }
+            
+            gameId = string.Empty;
+            inLobby = true;
+            hasJoinedGame = false;
+            gameState = new GameState();
+            commentaryMessages.Clear();
+        }
+        catch (Exception ex)
+        {
+            commentaryMessages.Add(new CommentaryMessage { Text = $"Error leaving game: {ex.Message}", Timestamp = DateTime.UtcNow });
+            Console.Error.WriteLine($"Error leaving game: {ex}");
+        }
+        finally
+        {
+            StateHasChanged();
+        }
+    }
+
+    private async Task UpdateCanvas()
+    {
+        if (gameCanvas.Id != null && gameState != null)
+        {
+            try
+            {
+                // Log the player count to debug
+                int homeCount = gameState.HomeTeam?.Players?.Count ?? 0;
+                int awayCount = gameState.AwayTeam?.Players?.Count ?? 0;
+                Console.WriteLine($"Updating canvas with {homeCount} home players and {awayCount} away players");
+                
+                // Explicitly call the specific rendering function from renderGameField.js 
+                // instead of a potentially conflicting one from gameConnection.js
+                await JSRuntime.InvokeVoidAsync("renderGameFieldFromRenderGameFieldJs", gameCanvas, gameState);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error updating canvas: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+        else
+        {
+            Console.WriteLine($"Not updating canvas. Canvas null? {gameCanvas.Id == null}, GameState null? {gameState == null}");
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await DisconnectGracefully();
+        await InvokeAsync(StateHasChanged);
+        GC.SuppressFinalize(this);
+    }
+
+    private async Task DisconnectGracefully()
+    {
+        if (!disposedValue)
+        {
+            disposedValue = true;
+
+            // Stop game timer
+            gameTimer?.Stop();
+            gameTimer?.Dispose();
+            gameTimer = null;
+
+            // Cancel reconnection attempts
+            _connectionCts?.Cancel();
+            _connectionCts?.Dispose();
+            _connectionCts = null;
+
+            // Clean up hub connection
+            if (hubConnection != null)
+            {
+                try
+                {
+                    if (!string.IsNullOrEmpty(gameId))
+                    {
+                        await LeaveGame();
+                    }
+                    
+                    await hubConnection.DisposeAsync();
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Error disposing hub connection: {ex}");
+                }
+                finally
+                {
+                    hubConnection = null;
+                }
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        // Call the async disposal method synchronously but don't wait for it
+        _ = DisconnectGracefully();
+        
+        // Dispose of timer synchronously if not already disposed
+        if (!disposedValue)
+        {
+            gameTimer?.Stop();
+            gameTimer?.Dispose();
+            gameTimer = null;
+            
+            _connectionCts?.Cancel();
+            
+            disposedValue = true;
+        }
+    }
+} 

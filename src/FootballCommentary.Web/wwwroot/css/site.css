@@ -1,0 +1,135 @@
+html, body {
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+
+.page {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+}
+
+main {
+    flex: 1;
+}
+
+.top-row {
+    background-color: #f7f7f7;
+    border-bottom: 1px solid #d6d5d5;
+    justify-content: flex-start;
+    height: 3.5rem;
+    display: flex;
+    align-items: center;
+    padding: 0 1rem;
+}
+
+.top-row h1 {
+    font-size: 1.8rem;
+    margin: 0;
+}
+
+.game-setup {
+    max-width: 800px;
+    margin: 2rem auto;
+    padding: 2rem;
+    background-color: #f8f9fa;
+    border-radius: 10px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+.game-field {
+    margin: 1rem 0;
+    position: relative;
+}
+
+#gameCanvas {
+    background-color: #4CAF50;
+    border: 2px solid #2E7D32;
+    border-radius: 5px;
+    width: 100%;
+    height: auto;
+}
+
+.scoreboard {
+    display: flex;
+    justify-content: space-between;
+    background-color: #333;
+    color: white;
+    padding: 0.5rem 1rem;
+    margin-top: 1rem;
+    border-radius: 5px;
+}
+
+.team-score {
+    font-size: 1.2rem;
+    font-weight: bold;
+}
+
+.controls {
+    margin: 1rem 0;
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.commentary-box {
+    background-color: #f8f9fa;
+    padding: 1rem;
+    border-radius: 5px;
+    box-shadow: 0 0 5px rgba(0, 0, 0, 0.1);
+    margin-top: 1rem;
+    height: 600px;
+    overflow: hidden;
+}
+
+.commentary-messages {
+    max-height: 550px;
+    overflow-y: auto;
+}
+
+.commentary-message {
+    padding: 0.5rem;
+    margin-bottom: 0.5rem;
+    border-bottom: 1px solid #eee;
+}
+
+.commentary-message p {
+    margin-bottom: 0.25rem;
+}
+
+.commentary-message small {
+    color: #666;
+}
+
+.hide {
+    display: none;
+}
+
+#blazor-error-ui {
+    background-color: lightyellow;
+    bottom: 0;
+    box-shadow: 0 -1px 2px rgba(0, 0, 0, 0.2);
+    display: none;
+    left: 0;
+    padding: 0.6rem 1.25rem 0.7rem 1.25rem;
+    position: fixed;
+    width: 100%;
+    z-index: 1000;
+}
+
+    #blazor-error-ui .dismiss {
+        cursor: pointer;
+        position: absolute;
+        right: 0.75rem;
+        top: 0.5rem;
+    }
+
+@media (max-width: 767.98px) {
+    .controls {
+        flex-direction: column;
+    }
+    
+    .controls button {
+        width: 100%;
+        margin-bottom: 0.5rem;
+    }
+} 

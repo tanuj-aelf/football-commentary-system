@@ -1,0 +1,47 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{D2B341C6-B5A6-4834-9E9B-E87A37A624D1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FootballCommentary.Core", "src\FootballCommentary.Core\FootballCommentary.Core.csproj", "{8B2E1B4D-5F0A-4C1F-83DA-65D3E93C0C30}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FootballCommentary.GAgents", "src\FootballCommentary.GAgents\FootballCommentary.GAgents.csproj", "{4A2D7F1B-3C5D-4BE9-91C5-8E90BD5C3D3D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FootballCommentary.Silo", "src\FootballCommentary.Silo\FootballCommentary.Silo.csproj", "{C3E0B1A9-9C3B-4B2A-BC23-2E89D23F9D58}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FootballCommentary.Web", "src\FootballCommentary.Web\FootballCommentary.Web.csproj", "{BF3E4A1E-0F9D-4CF3-9D96-C3BBBFA2B1C9}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{8B2E1B4D-5F0A-4C1F-83DA-65D3E93C0C30}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8B2E1B4D-5F0A-4C1F-83DA-65D3E93C0C30}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8B2E1B4D-5F0A-4C1F-83DA-65D3E93C0C30}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8B2E1B4D-5F0A-4C1F-83DA-65D3E93C0C30}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4A2D7F1B-3C5D-4BE9-91C5-8E90BD5C3D3D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4A2D7F1B-3C5D-4BE9-91C5-8E90BD5C3D3D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4A2D7F1B-3C5D-4BE9-91C5-8E90BD5C3D3D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4A2D7F1B-3C5D-4BE9-91C5-8E90BD5C3D3D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C3E0B1A9-9C3B-4B2A-BC23-2E89D23F9D58}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C3E0B1A9-9C3B-4B2A-BC23-2E89D23F9D58}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C3E0B1A9-9C3B-4B2A-BC23-2E89D23F9D58}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C3E0B1A9-9C3B-4B2A-BC23-2E89D23F9D58}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BF3E4A1E-0F9D-4CF3-9D96-C3BBBFA2B1C9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BF3E4A1E-0F9D-4CF3-9D96-C3BBBFA2B1C9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BF3E4A1E-0F9D-4CF3-9D96-C3BBBFA2B1C9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BF3E4A1E-0F9D-4CF3-9D96-C3BBBFA2B1C9}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{8B2E1B4D-5F0A-4C1F-83DA-65D3E93C0C30} = {D2B341C6-B5A6-4834-9E9B-E87A37A624D1}
+		{4A2D7F1B-3C5D-4BE9-91C5-8E90BD5C3D3D} = {D2B341C6-B5A6-4834-9E9B-E87A37A624D1}
+		{C3E0B1A9-9C3B-4B2A-BC23-2E89D23F9D58} = {D2B341C6-B5A6-4834-9E9B-E87A37A624D1}
+		{BF3E4A1E-0F9D-4CF3-9D96-C3BBBFA2B1C9} = {D2B341C6-B5A6-4834-9E9B-E87A37A624D1}
+	EndGlobalSection
+EndGlobal 
