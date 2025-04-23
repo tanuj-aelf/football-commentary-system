@@ -5,6 +5,7 @@
 @using System.Timers
 @using Microsoft.JSInterop
 @using Microsoft.AspNetCore.Components.Web
+@using System.Numerics
 @inject NavigationManager NavigationManager
 @inject IJSRuntime JSRuntime
 @implements IAsyncDisposable
@@ -166,6 +167,65 @@
                 catch (Exception ex)
                 {
                     Console.Error.WriteLine($"Error handling GameStateUpdated: {ex.Message}");
+                }
+            });
+        });
+        
+        hubConnection.On<string, string, Position, object>("UpdatePlayerPosition", async (gameId, playerId, position, velocity) =>
+        {
+            if (gameId != this.gameId) return;
+            
+            await InvokeAsync(() =>
+            {
+                try
+                {
+                    // Update player position in local state
+                    if (gameState?.HomeTeam?.Players != null)
+                    {
+                        var player = gameState.HomeTeam.Players.FirstOrDefault(p => p.PlayerId == playerId);
+                        if (player != null)
+                        {
+                            player.Position = position;
+                            UpdateCanvas();
+                            return;
+                        }
+                    }
+                    
+                    if (gameState?.AwayTeam?.Players != null)
+                    {
+                        var player = gameState.AwayTeam.Players.FirstOrDefault(p => p.PlayerId == playerId);
+                        if (player != null)
+                        {
+                            player.Position = position;
+                            UpdateCanvas();
+                            return;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Error handling UpdatePlayerPosition: {ex.Message}");
+                }
+            });
+        });
+        
+        hubConnection.On<string, Position, object>("UpdateBallPosition", async (gameId, position, velocity) =>
+        {
+            if (gameId != this.gameId) return;
+            
+            await InvokeAsync(() =>
+            {
+                try
+                {
+                    if (gameState?.Ball != null)
+                    {
+                        gameState.Ball.Position = position;
+                        UpdateCanvas();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Error handling UpdateBallPosition: {ex.Message}");
                 }
             });
         });
@@ -398,23 +458,33 @@
 
     private void OnTimerElapsed(object? sender, ElapsedEventArgs e)
     {
-        try
+        if (!_isReconnecting && gameState != null && gameState.HomeTeam?.Players != null && gameState.AwayTeam?.Players != null)
         {
-            // Only update if we're in a game, not disposed, and have data
-            if (isGameCreated && !disposedValue && gameState != null && 
-                gameState.HomeTeam?.Players != null && gameState.AwayTeam?.Players != null)
+            // Update the elapsed time
+            if (gameState.Status == GameStatus.InProgress)
             {
-                // This ensures UI gets updated on the UI thread
-                _ = InvokeAsync(() => {
-                    UpdateCanvas();
+                // Use GameTime property instead of ElapsedTime
+                if (gameState.GameTime == null)
+                {
+                    gameState.GameTime = new TimeSpan();
+                }
+                gameState.GameTime += TimeSpan.FromSeconds(0.25); // 250ms update
+                
+                // Request latest game state if connected
+                if (hubConnection?.State == HubConnectionState.Connected && !string.IsNullOrEmpty(gameId))
+                {
+                    // Only request updates occasionally to reduce network traffic
+                    if (DateTime.Now.Millisecond < 250) // roughly once per second
+                    {
+                        _ = hubConnection.InvokeAsync("GetGameState", gameId);
+                    }
+                }
+                
+                InvokeAsync(() => {
+                    UpdateCanvas(); // Update UI asynchronously
                     StateHasChanged();
-                    return Task.CompletedTask;
                 });
             }
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"Error in timer callback: {ex.Message}");
         }
     }
 
@@ -604,30 +674,18 @@
         }
     }
 
-    private async Task UpdateCanvas()
+    private void UpdateCanvas()
     {
-        if (gameCanvas.Id != null && gameState != null)
-        {
-            try
-            {
-                // Log the player count to debug
-                int homeCount = gameState.HomeTeam?.Players?.Count ?? 0;
-                int awayCount = gameState.AwayTeam?.Players?.Count ?? 0;
-                Console.WriteLine($"Updating canvas with {homeCount} home players and {awayCount} away players");
-                
-                // Explicitly call the specific rendering function from renderGameField.js 
-                // instead of a potentially conflicting one from gameConnection.js
-                await JSRuntime.InvokeVoidAsync("renderGameFieldFromRenderGameFieldJs", gameCanvas, gameState);
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"Error updating canvas: {ex.Message}\n{ex.StackTrace}");
-            }
-        }
-        else
-        {
-            Console.WriteLine($"Not updating canvas. Canvas null? {gameCanvas.Id == null}, GameState null? {gameState == null}");
-        }
+        if (gameState == null)
+            return;
+
+        Console.WriteLine($"Updating canvas with {gameState.HomeTeam?.Players?.Count ?? 0} home players and {gameState.AwayTeam?.Players?.Count ?? 0} away players");
+        
+        // Use the renamed function to avoid conflicts
+        JSRuntime.InvokeVoidAsync("renderGameFieldFromRenderGameFieldJs", gameCanvas, gameState);
+        
+        // Force UI update
+        StateHasChanged();
     }
 
     public async ValueTask DisposeAsync()

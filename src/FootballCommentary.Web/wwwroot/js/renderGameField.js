@@ -3,6 +3,18 @@
  * This script handles the rendering of the game state on the canvas
  */
 
+// Add a function to force a browser repaint
+function forceRepaint() {
+    // Force a browser repaint by temporarily modifying a watched DOM property
+    // This trick forces the browser to update the visual display
+    requestAnimationFrame(() => {
+        document.body.style.opacity = 0.999;
+        setTimeout(() => {
+            document.body.style.opacity = 1;
+        }, 0);
+    });
+}
+
 // Rename the function to avoid conflicts with gameConnection.js
 function renderGameFieldFromRenderGameFieldJs(canvas, gameState) {
     if (!canvas || !gameState) {
@@ -116,6 +128,9 @@ function renderGameFieldFromRenderGameFieldJs(canvas, gameState) {
     if (gameTime) {
         drawGameTime(ctx, width, gameTime);
     }
+    
+    // Force a browser repaint to ensure the canvas updates are immediately visible
+    forceRepaint();
 }
 
 // Also expose the original name for backward compatibility

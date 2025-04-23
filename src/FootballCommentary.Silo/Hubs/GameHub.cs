@@ -442,5 +442,32 @@ namespace FootballCommentary.Silo.Hubs
                 _logger.LogError(ex, "Error subscribing to streams for game {GameId}: {Message}", gameId, ex.Message);
             }
         }
+
+        public async Task<FootballCommentary.Core.Models.GameState> GetGameState(string gameId)
+        {
+            try
+            {
+                if (!_gameToGrainMap.TryGetValue(gameId, out var grainId))
+                {
+                    _logger.LogError("No grain ID found for game {GameId}", gameId);
+                    await Clients.Caller.SendAsync("Error", $"Game {gameId} not found");
+                    return null;
+                }
+                
+                var gameStateAgent = _clusterClient.GetGrain<IGameStateAgent>(grainId);
+                var gameState = await gameStateAgent.GetGameStateAsync(gameId);
+                
+                // Send the updated state to the requesting client
+                await Clients.Caller.SendAsync("GameStateUpdated", gameState);
+                
+                return gameState;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting game state for game {GameId}: {Message}", gameId, ex.Message);
+                await Clients.Caller.SendAsync("Error", "Failed to get game state: " + ex.Message);
+                return null;
+            }
+        }
     }
 } 
