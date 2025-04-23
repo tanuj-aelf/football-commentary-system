@@ -92,4 +92,53 @@ mono_crash.*
 .Trashes
 Icon?
 ehthumbs.db
-Thumbs.db 
+Thumbs.db
+
+# .NET Core
+.vs/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+build/
+bld/
+[Bb]in/
+[Oo]bj/
+msbuild.log
+msbuild.err
+msbuild.wrn
+
+# Environment files with sensitive information
+.env
+.env.local
+.env.development
+.env.production
+
+# Orleans
+orleans.log
+OrleansStatisticsCounters.csv
+
+# Tool directories
+.idea/
+.ionide/
+.DS_Store
+
+# Package files
+*.nupkg
+*.snupkg
+project.lock.json
+project.assets.json
+artifacts/
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+*.log 
