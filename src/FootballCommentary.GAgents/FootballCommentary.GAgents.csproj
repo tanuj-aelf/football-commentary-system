@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../FootballCommentary.Core/FootballCommentary.Core.csproj" />
+    <ProjectReference Include="..\FootballCommentary.Web\FootballCommentary.Web.csproj" />
   </ItemGroup>
 
   <ItemGroup>

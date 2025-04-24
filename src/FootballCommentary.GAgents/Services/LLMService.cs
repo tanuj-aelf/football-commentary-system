@@ -1,114 +1,177 @@
 using FootballCommentary.Core.Abstractions;
-using Microsoft.Extensions.Configuration;
+using FootballCommentary.Web.Configuration;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
+using System.Collections.Generic;
 
 namespace FootballCommentary.GAgents.Services
 {
     public class LLMService : ILLMService
     {
         private readonly ILogger<LLMService> _logger;
-        private readonly string _apiKey;
-        private readonly string _modelName;
-        private readonly bool _useFallbackLLM;
+        private readonly LlmConfiguration _llmConfig;
         private readonly HttpClient _httpClient;
-        
-        public LLMService(IConfiguration configuration, ILogger<LLMService> logger, IHttpClientFactory httpClientFactory)
+        private readonly HttpClient _azureHttpClient;
+
+        public LLMService(LlmConfiguration llmConfig, ILogger<LLMService> logger, IHttpClientFactory httpClientFactory)
         {
             _logger = logger;
+            _llmConfig = llmConfig;
             _httpClient = httpClientFactory.CreateClient("GeminiApi");
-            
-            string configApiKey = configuration["GOOGLE_GEMINI_API_KEY"];
-            string envApiKey = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_API_KEY");
-            _apiKey = configApiKey ?? envApiKey ??
-                      string.Empty;
-            
-            string configModel = configuration["GOOGLE_GEMINI_MODEL"];
-            string envModel = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_MODEL");
-            _modelName = configModel ?? envModel ??
-                         "gemini-1.5-flash";
-            
-            string configFallback = configuration["USE_FALLBACK_LLM"];
-            string envFallback = Environment.GetEnvironmentVariable("USE_FALLBACK_LLM");
-            var useFallbackStr = configFallback ?? envFallback ??
-                                "false";
-            
-            _useFallbackLLM = bool.TryParse(useFallbackStr, out var fallback) && fallback;
-            
-            _logger.LogInformation("--- LLM Service Configuration ---");
-            _logger.LogInformation("Config Key Present: {Present}", !string.IsNullOrEmpty(configApiKey));
-            _logger.LogInformation("Env Var Key Present: {Present}", !string.IsNullOrEmpty(envApiKey));
-            _logger.LogInformation("Final API Key Present: {Present}", !string.IsNullOrEmpty(_apiKey));
-            _logger.LogInformation("Config Model: {Model}", configModel ?? "<null>");
-            _logger.LogInformation("Env Var Model: {Model}", envModel ?? "<null>");
-            _logger.LogInformation("Final Model Used: {Model}", _modelName);
-            _logger.LogInformation("Config Fallback: {Fallback}", configFallback ?? "<null>");
-            _logger.LogInformation("Env Var Fallback: {Fallback}", envFallback ?? "<null>");
-            _logger.LogInformation("Final Use Fallback Setting: {UseFallback}", useFallbackStr);
-            _logger.LogInformation("Parsed Use Fallback: {UseFallback}", _useFallbackLLM);
-            _logger.LogInformation("---------------------------------");
-            
-            if (string.IsNullOrEmpty(_apiKey) && !_useFallbackLLM)
+            _azureHttpClient = httpClientFactory.CreateClient("AzureOpenAIApi");
+
+            _logger.LogInformation("--- LLMService constructor executed. ---");
+
+            _logger.LogInformation("LLM Service initialized using LlmConfiguration.");
+            if (!_llmConfig.IsGoogleSelected && !_llmConfig.IsAzureSelected)
             {
-                _logger.LogWarning("Google Gemini API key not found. Using fallback LLM.");
-                _useFallbackLLM = true;
+                 _logger.LogWarning("LLM Service: Neither Google nor Azure OpenAI is selected in configuration.");
             }
-            
-            _logger.LogInformation("LLM Service initialized. Model: {Model}, Use Fallback: {Fallback}, API Key Present: {HasKey}", 
-                _modelName, _useFallbackLLM, !string.IsNullOrEmpty(_apiKey));
+            else if (_llmConfig.IsGoogleSelected && string.IsNullOrEmpty(_llmConfig.ActiveApiKey))
+            {
+                _logger.LogWarning("LLM Service: Google selected, but API Key is missing.");
+            }
+             else if (_llmConfig.IsAzureSelected && (string.IsNullOrEmpty(_llmConfig.ActiveApiKey) || string.IsNullOrEmpty(_llmConfig.ActiveEndpoint)))
+            {
+                 _logger.LogWarning("LLM Service: Azure OpenAI selected, but API Key or Endpoint is missing.");
+            }
         }
         
         public Task<string> GenerateCommentaryAsync(string prompt)
         {
+             _logger.LogDebug("GenerateCommentaryAsync called with prompt: {Prompt}", prompt);
             return GenerateContentAsync(
-                "You are a passionate football commentator. " +
-                "Provide energetic, colorful, and concise commentary about the events in a football match. " +
-                "Keep your responses brief and under 30 words, focused on the specific event described.",
+                "You are an energetic football commentator. Provide concise, exciting commentary (under 30 words) for the given event.",
                 prompt);
         }
         
         public async Task<string> GenerateContentAsync(string systemPrompt, string userPrompt)
         {
-            if (_useFallbackLLM)
+            _logger.LogDebug("GenerateContentAsync called. System: \"{SystemPrompt}\", User: \"{UserPrompt}\"", systemPrompt, userPrompt);
+
+            if (_llmConfig.IsAzureSelected)
             {
+                _logger.LogInformation("Using Azure OpenAI model: {Deployment}", _llmConfig.ActiveDeploymentName);
+                return await CallAzureOpenAIAsync(systemPrompt, userPrompt);
+            }
+            else if (_llmConfig.IsGoogleSelected)
+            {
+                 _logger.LogInformation("Using Google Gemini model: {Model}", _llmConfig.ActiveModelName);
+                return await CallGoogleGeminiAsync(systemPrompt, userPrompt);
+            }
+            else
+            {
+                _logger.LogWarning("No valid LLM selected (Azure/Google). Using fallback response.");
                 return GetFallbackResponse(userPrompt);
             }
+        }
+
+        private async Task<string> CallAzureOpenAIAsync(string systemPrompt, string userPrompt)
+        {
+            if (string.IsNullOrEmpty(_llmConfig.ActiveApiKey) || string.IsNullOrEmpty(_llmConfig.ActiveEndpoint) || string.IsNullOrEmpty(_llmConfig.ActiveDeploymentName))
+            {
+                _logger.LogError("Azure OpenAI configuration (Key, Endpoint, Deployment) is incomplete.");
+                return GetFallbackResponse(userPrompt);
+            }
+
+            var endpoint = $"{_llmConfig.ActiveEndpoint.TrimEnd('/')}/openai/deployments/{_llmConfig.ActiveDeploymentName}/chat/completions?api-version=2024-02-15-preview";
+
+            var requestPayload = new
+            {
+                messages = new[]
+                {
+                    new { role = "system", content = systemPrompt },
+                    new { role = "user", content = userPrompt }
+                },
+                temperature = 0.7,
+                max_tokens = 100
+            };
+
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                request.Headers.Add("api-key", _llmConfig.ActiveApiKey);
+                request.Content = JsonContent.Create(requestPayload);
+
+                var response = await _azureHttpClient.SendAsync(request);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    var responseJson = await response.Content.ReadFromJsonAsync<JsonDocument>();
+                    var generatedText = responseJson?.RootElement
+                                            .GetProperty("choices")[0]
+                                            .GetProperty("message")
+                                            .GetProperty("content")
+                                            .GetString();
+
+                    if (!string.IsNullOrEmpty(generatedText))
+                    {
+                         _logger.LogInformation("Generated content from Azure OpenAI: {Text}", generatedText);
+                        return generatedText;
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Azure OpenAI response did not contain expected content.");
+                    }
+                }
+                else
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    _logger.LogError("Azure OpenAI API error: {StatusCode} - {Error}", response.StatusCode, errorContent);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error calling Azure OpenAI API: {Message}", ex.Message);
+            }
+
+            return GetFallbackResponse(userPrompt);
+        }
+
+        private async Task<string> CallGoogleGeminiAsync(string systemPrompt, string userPrompt)
+        {
+             if (string.IsNullOrEmpty(_llmConfig.ActiveApiKey) || string.IsNullOrEmpty(_llmConfig.ActiveModelName))
+            {
+                _logger.LogError("Google Gemini configuration (Key, Model) is incomplete.");
+                return GetFallbackResponse(userPrompt);
+            }
+
+            var geminiEndpoint = $"https://generativelanguage.googleapis.com/v1/models/{_llmConfig.ActiveModelName}:generateContent?key={_llmConfig.ActiveApiKey}";
+
+            var requestData = new
+            {
+                contents = new[]
+                {
+                    new
+                    {
+                        role = "user",
+                        parts = new[]
+                        {
+                            new { text = $"{systemPrompt}\n\n{userPrompt}" }
+                        }
+                    }
+                },
+                generationConfig = new
+                {
+                    temperature = 0.7,
+                    maxOutputTokens = 100
+                }
+            };
             
             try
             {
-                // Use the Google Gemini API directly
-                var geminiEndpoint = $"https://generativelanguage.googleapis.com/v1/models/{_modelName}:generateContent?key={_apiKey}";
-                
-                var requestData = new
-                {
-                    contents = new[]
-                    {
-                        new
-                        {
-                            role = "user",
-                            parts = new[]
-                            {
-                                new { text = $"{systemPrompt}\n\n{userPrompt}" }
-                            }
-                        }
-                    },
-                    generationConfig = new
-                    {
-                        temperature = 0.7,
-                        maxOutputTokens = 100
-                    }
-                };
-                
                 var response = await _httpClient.PostAsJsonAsync(geminiEndpoint, requestData);
                 if (response.IsSuccessStatusCode)
                 {
                     var responseContent = await response.Content.ReadFromJsonAsync<JsonDocument>();
-                    // Extract the text from the response
                     var generatedText = responseContent?.RootElement
                         .GetProperty("candidates")[0]
                         .GetProperty("content")
@@ -121,26 +184,28 @@ namespace FootballCommentary.GAgents.Services
                         _logger.LogInformation("Generated content from Gemini API: {Text}", generatedText);
                         return generatedText;
                     }
+                     else
+                    {
+                        _logger.LogWarning("Google Gemini response did not contain expected content.");
+                    }
                 }
                 else
                 {
                     var errorContent = await response.Content.ReadAsStringAsync();
                     _logger.LogError("Gemini API error: {StatusCode} - {Error}", response.StatusCode, errorContent);
                 }
-                
-                // Fallback if API call fails
-                return GetFallbackResponse(userPrompt);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error generating content: {Message}", ex.Message);
-                return GetFallbackResponse(userPrompt);
+                 _logger.LogError(ex, "Error calling Google Gemini API: {Message}", ex.Message);
             }
+
+            return GetFallbackResponse(userPrompt);
         }
         
         private string GetFallbackResponse(string prompt)
         {
-            // Simple fallbacks based on keywords in the prompt
+            _logger.LogWarning("Using fallback commentary for prompt: {Prompt}", prompt);
             if (prompt.Contains("goal", StringComparison.OrdinalIgnoreCase))
             {
                 return "GOAL! What a fantastic finish! The crowd goes wild!";
@@ -157,7 +222,7 @@ namespace FootballCommentary.GAgents.Services
             {
                 return "Strong challenge! They won the ball cleanly.";
             }
-            else if (prompt.Contains("start", StringComparison.OrdinalIgnoreCase))
+            else if (prompt.Contains("start", StringComparison.OrdinalIgnoreCase) || prompt.Contains("kickoff", StringComparison.OrdinalIgnoreCase))
             {
                 return "And we're underway! The match begins with high intensity.";
             }
