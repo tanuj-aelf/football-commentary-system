@@ -2,6 +2,13 @@
 
 Real-time AI Football Game Master and Commentary System built with Orleans, SignalR, and the Aevatar Framework.
 
+## Screenshots
+![Uploading Screenshot 2025-04-24 at 8.49.24 AM.png…]()
+
+![Uploading Screenshot 2025-04-24 at 8.49.39 AM.png…]()
+
+![Uploading Screenshot 2025-04-24 at 8.49.52 AM.png…]()
+
 ## Overview
 
 This application demonstrates the use of AI agents with the Aevatar framework to create a live sports commentary system. The system includes:
