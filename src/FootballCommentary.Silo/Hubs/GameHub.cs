@@ -353,6 +353,9 @@ namespace FootballCommentary.Silo.Hubs
                 var gameStateAgent = _clusterClient.GetGrain<IGameStateAgent>(grainId);
                 var gameState = await gameStateAgent.EndGameAsync(gameId);
                 
+                // Stop commentary polling for this game
+                CommentaryPollingManager.StopPolling(gameId);
+
                 await Clients.Group(gameId).SendAsync("GameStateUpdated", gameState);
             }
             catch (Exception ex)

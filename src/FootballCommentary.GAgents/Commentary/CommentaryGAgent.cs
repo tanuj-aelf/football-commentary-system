@@ -26,6 +26,7 @@ namespace FootballCommentary.GAgents.Commentary
         [Id(1)] public Dictionary<string, FootballCommentary.Core.Models.GameState> GameStates { get; set; } = new();
         [Id(2)] public DateTime LastCommentaryTime { get; set; } = DateTime.MinValue;
         [Id(3)] public List<CommentaryLogEvent> LogEvents { get; set; } = new();
+        [Id(4)] public bool IsGameEnded { get; set; } = false;
     }
 
     public class CommentaryGAgent : Grain, ICommentaryAgent
@@ -35,6 +36,17 @@ namespace FootballCommentary.GAgents.Commentary
         private readonly IPersistentState<CommentaryGAgentState> _state;
         private readonly Random _random = new Random();
         
+        // Throttling settings
+        private static readonly TimeSpan CommentaryThrottleInterval = TimeSpan.FromSeconds(7);
+        private static readonly HashSet<GameEventType> ThrottledEventTypes = new HashSet<GameEventType>
+        {
+            GameEventType.Pass,
+            GameEventType.Shot,
+            GameEventType.Tackle,
+            GameEventType.Save,
+            GameEventType.OutOfBounds // Add other frequent, less critical events if needed
+        };
+
         private IStreamProvider? _streamProvider;
         private IDisposable? _backgroundCommentaryTimer;
         private StreamSubscriptionHandle<GameEvent>? _gameEventSubscription;
@@ -101,20 +113,66 @@ namespace FootballCommentary.GAgents.Commentary
         {
             _logger.LogInformation("Received game event: {EventType} for game {GameId}", 
                 gameEvent.EventType, gameEvent.GameId);
-                
-            var commentary = await GenerateEventCommentaryAsync(gameEvent);
-            
-            if (commentary != null)
+
+            // Check if game already ended (robustness check)
+            if (_state.State.IsGameEnded && gameEvent.EventType != GameEventType.GameEnd) 
             {
-                // Store the commentary
-                if (!_state.State.GameCommentary.ContainsKey(gameEvent.GameId))
-                    _state.State.GameCommentary[gameEvent.GameId] = new List<CommentaryMessage>();
-                    
-                _state.State.GameCommentary[gameEvent.GameId].Add(commentary);
-                await _state.WriteStateAsync();
+                _logger.LogWarning("Game {GameId} already ended (state flag), skipping event {EventType}.", gameEvent.GameId, gameEvent.EventType);
+                return;
+            }
+
+            // Handle Game End specifically
+            if (gameEvent.EventType == GameEventType.GameEnd)
+            {
+                _logger.LogInformation("Game {GameId} ended. Setting flag and initiating cleanup.", gameEvent.GameId);
+                if (!_state.State.IsGameEnded)
+                {
+                   _state.State.IsGameEnded = true;
+                   await _state.WriteStateAsync(); 
+                   _logger.LogInformation("IsGameEnded flag set to true for game {GameId}.", gameEvent.GameId);
+                }
                 
-                // Publish the commentary
-                await PublishCommentaryMessageAsync(commentary);
+                var finalCommentary = await GenerateEventCommentaryAsync(gameEvent); // Generate final commentary
+                if (finalCommentary != null && !string.IsNullOrEmpty(finalCommentary.Text)) 
+                {
+                    await StoreAndPublishCommentary(gameEvent.GameId, finalCommentary);
+                }
+
+                // Cleanup resources
+                _backgroundCommentaryTimer?.Dispose();
+                _backgroundCommentaryTimer = null;
+                if (_gameEventSubscription != null) { try { await _gameEventSubscription.UnsubscribeAsync(); } catch { /* Ignore */ } _gameEventSubscription = null; }
+                if (_gameStateSubscription != null) { try { await _gameStateSubscription.UnsubscribeAsync(); } catch { /* Ignore */ } _gameStateSubscription = null; }
+                _logger.LogInformation("Cleanup complete for ended game {GameId}.", gameEvent.GameId);
+                
+                // DeactivateOnIdle(); 
+                return; 
+            }
+                
+            // --- Throttling Logic for other events ---
+            bool shouldGenerate = true;
+            if (ThrottledEventTypes.Contains(gameEvent.EventType))
+            {
+                if ((DateTime.UtcNow - _state.State.LastCommentaryTime) < CommentaryThrottleInterval)
+                {
+                    _logger.LogDebug("Skipping commentary generation for throttled event {EventType} due to interval.", gameEvent.EventType);
+                    shouldGenerate = false;
+                }
+            }
+            // --- End Throttling Logic ---
+
+            if (shouldGenerate)
+            {
+                var commentary = await GenerateEventCommentaryAsync(gameEvent);
+                if (commentary != null && !string.IsNullOrEmpty(commentary.Text))
+                {
+                    await StoreAndPublishCommentary(gameEvent.GameId, commentary);
+                }
+            }
+            else
+            {
+                 // Optionally log that generation was skipped due to throttling
+                 // _logger.LogInformation("Skipped commentary for event {EventType} due to throttling", gameEvent.EventType);
             }
         }
         
@@ -151,6 +209,12 @@ namespace FootballCommentary.GAgents.Commentary
         
         public async Task<CommentaryMessage> GenerateEventCommentaryAsync(GameEvent gameEvent)
         {
+            if (_state.State.IsGameEnded && gameEvent.EventType != GameEventType.GameEnd) // Allow final GameEnd commentary generation
+            {
+                _logger.LogInformation("GenerateEventCommentaryAsync: Game {GameId} ended, skipping generation for event {EventType}.", gameEvent.GameId, gameEvent.EventType);
+                return new CommentaryMessage { GameId = gameEvent.GameId, Text = string.Empty };
+            }
+
             try
             {
                 // Get the current game state if available
@@ -216,6 +280,12 @@ namespace FootballCommentary.GAgents.Commentary
         
         public async Task<CommentaryMessage> GenerateGameSummaryAsync(string gameId)
         {
+            if (_state.State.IsGameEnded)
+            {
+                 _logger.LogInformation("GenerateGameSummaryAsync: Game {GameId} ended, skipping summary generation.", gameId);
+                return new CommentaryMessage { GameId = gameId, Text = string.Empty, Type = CommentaryType.Summary };
+            }
+
             try
             {
                 var gameState = await GetGameStateForCommentaryAsync(gameId);
@@ -363,6 +433,12 @@ namespace FootballCommentary.GAgents.Commentary
         
         public async Task<CommentaryMessage> GenerateBackgroundCommentaryAsync(string gameId)
         {
+            if (_state.State.IsGameEnded)
+            {
+                 _logger.LogInformation("GenerateBackgroundCommentaryAsync: Game {GameId} ended, skipping background commentary.", gameId);
+                return new CommentaryMessage { GameId = gameId, Text = string.Empty, Type = CommentaryType.Background };
+            }
+
             // Don't generate background commentary if we've had a recent commentary
             if ((DateTime.UtcNow - _state.State.LastCommentaryTime).TotalMinutes < 2)
             {
@@ -661,6 +737,24 @@ namespace FootballCommentary.GAgents.Commentary
                 default:
                     return $"Event: {gameEvent.EventType}";
             }
+        }
+
+        // Helper method to reduce code duplication
+        private async Task StoreAndPublishCommentary(string gameId, CommentaryMessage commentary)
+        {
+            // Store the commentary
+            if (!_state.State.GameCommentary.ContainsKey(gameId))
+                _state.State.GameCommentary[gameId] = new List<CommentaryMessage>();
+                
+            _state.State.GameCommentary[gameId].Add(commentary);
+            
+            // Update last commentary time whenever we store/publish something
+            _state.State.LastCommentaryTime = commentary.Timestamp; 
+
+            await _state.WriteStateAsync();
+            
+            // Publish the commentary
+            await PublishCommentaryMessageAsync(commentary);
         }
     }
 } 
