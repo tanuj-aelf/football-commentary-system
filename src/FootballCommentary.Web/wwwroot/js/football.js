@@ -224,16 +224,6 @@ function renderGameField(canvas, gameState, currentAnimatedBallPosition) {
               drawCircle(ctx, ballX, ballY, ballRadius, ballColor);
          }
     }
-    
-    // Draw game timer
-    if (gameState.gameTime !== undefined) {
-        const minutes = Math.floor(gameState.gameTime.totalMinutes) || 0;
-        const seconds = Math.floor(gameState.gameTime.totalSeconds % 60) || 0;
-        
-        ctx.fillStyle = "white";
-        ctx.font = "20px Arial";
-        ctx.fillText(`${minutes}:${seconds.toString().padStart(2, '0')}`, width / 2 - 30, 20);
-    }
 }
 
 // Animation loop using requestAnimationFrame

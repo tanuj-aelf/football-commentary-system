@@ -240,11 +240,47 @@ function drawScores(ctx, width, homeScore, awayScore) {
 
 // Draw game time
 function drawGameTime(ctx, width, gameTime) {
-    const minutes = Math.floor(gameTime.TotalMinutes || gameTime.totalMinutes || 0);
-    const seconds = Math.floor((gameTime.TotalSeconds || gameTime.totalSeconds || 0) % 60);
+    if (!gameTime) {
+        ctx.fillStyle = 'white';
+        ctx.font = 'bold 20px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('0:00', width / 2, 20);
+        return;
+    }
+    
+    // Handle different formats of game time
+    let minutes = 0;
+    let seconds = 0;
+    
+    // Case 1: Object with totalMinutes/TotalMinutes properties (TimeSpan serialized from C#)
+    if (typeof gameTime === 'object') {
+        if (gameTime.totalMinutes !== undefined) {
+            minutes = Math.floor(gameTime.totalMinutes);
+            seconds = Math.floor(gameTime.totalSeconds % 60);
+        } else if (gameTime.TotalMinutes !== undefined) {
+            minutes = Math.floor(gameTime.TotalMinutes);
+            seconds = Math.floor(gameTime.TotalSeconds % 60);
+        }
+    } 
+    // Case 2: String in format "HH:MM:SS" or similar
+    else if (typeof gameTime === 'string' && gameTime.includes(':')) {
+        const parts = gameTime.split(':');
+        if (parts.length >= 2) {
+            minutes = parseInt(parts[parts.length - 2]) || 0;
+            seconds = parseInt(parts[parts.length - 1]) || 0;
+        }
+    }
+    // Case 3: It's just a number (seconds)
+    else if (typeof gameTime === 'number') {
+        minutes = Math.floor(gameTime / 60);
+        seconds = Math.floor(gameTime % 60);
+    }
+    
+    // Format time as MM:SS
+    const formattedTime = `${minutes}:${seconds.toString().padStart(2, '0')}`;
     
     ctx.fillStyle = 'white';
     ctx.font = 'bold 20px Arial';
     ctx.textAlign = 'center';
-    ctx.fillText(`${minutes}:${seconds.toString().padStart(2, '0')}`, width / 2, 20);
+    ctx.fillText(formattedTime, width / 2, 20);
 } 

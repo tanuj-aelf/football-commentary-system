@@ -52,6 +52,7 @@ main {
 .scoreboard {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     background-color: #333;
     color: white;
     padding: 0.5rem 1rem;
@@ -62,6 +63,8 @@ main {
 .team-score {
     font-size: 1.2rem;
     font-weight: bold;
+    text-align: center;
+    flex-basis: 30%;
 }
 
 .controls {
@@ -132,4 +135,22 @@ main {
         width: 100%;
         margin-bottom: 0.5rem;
     }
+}
+
+/* Game timer styling */
+.game-timer {
+    font-size: 24px;
+    font-weight: bold;
+    color: white;
+    padding: 5px 15px;
+    border-radius: 4px;
+    text-align: center;
+    flex-grow: 1;
+    margin: 0 1rem;
+}
+
+.game-timer h3 {
+    margin: 0;
+    font-family: monospace;
+    font-size: 2rem;
 } 

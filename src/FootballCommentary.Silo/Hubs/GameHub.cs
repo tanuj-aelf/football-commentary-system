@@ -488,7 +488,7 @@ namespace FootballCommentary.Silo.Hubs
             {
                 if (!_gameToGrainMap.TryGetValue(gameId, out var grainId))
                 {
-                    _logger.LogError("No grain ID found for game {GameId}", gameId);
+                    _logger.LogWarning("No grain ID found for game {GameId}", gameId);
                     await Clients.Caller.SendAsync("Error", $"Game {gameId} not found");
                     return null;
                 }
@@ -496,7 +496,7 @@ namespace FootballCommentary.Silo.Hubs
                 var gameStateAgent = _clusterClient.GetGrain<IGameStateAgent>(grainId);
                 var gameState = await gameStateAgent.GetGameStateAsync(gameId);
                 
-                // Send the updated state to the requesting client
+                // Send the updated state to the requesting client only
                 await Clients.Caller.SendAsync("GameStateUpdated", gameState);
                 
                 return gameState;

@@ -430,7 +430,7 @@ namespace FootballCommentary.GAgents.GameState
                 }
                 
                 // Publish state update every 5 steps (moved earlier)
-                if (game.Status != GameStatus.NotStarted && game.SimulationStep % 5 == 0) // Don't publish before first step
+                if (game.Status != GameStatus.NotStarted && game.SimulationStep % 2 == 0) // Publish every 2 steps (200ms) for smoother updates
                 {
                     await PublishGameStateUpdateAsync(game);
                 }
@@ -493,8 +493,11 @@ namespace FootballCommentary.GAgents.GameState
                 }
                 
                 // Update game time
-                var elapsed = DateTime.UtcNow - game.GameStartTime;
-                game.GameTime = elapsed;
+                var realElapsed = DateTime.UtcNow - game.GameStartTime;
+                // Scale real time: 1 real minute = 90 game minutes
+                var scaledMinutes = realElapsed.TotalMinutes * 90;
+                // Convert to TimeSpan (this will be what's displayed on screen)
+                game.GameTime = TimeSpan.FromMinutes(scaledMinutes);
                 
                 // Randomly decide if we should publish an event
                 bool publishEvent = false;
@@ -527,8 +530,8 @@ namespace FootballCommentary.GAgents.GameState
                 // Increment simulation step
                 game.SimulationStep++;
                 
-                // End game after 5 minutes (game time)
-                if (game.GameTime.TotalMinutes >= 5 && game.Status == GameStatus.InProgress)
+                // End game after 90 minutes (game time)
+                if (game.GameTime.TotalMinutes >= 90 && game.Status == GameStatus.InProgress)
                 {
                     await EndGameAsync(gameId);
                 }
