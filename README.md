@@ -1,5 +1,3 @@
-<img width="1728" alt="Screenshot 2025-04-24 at 8 49 24 AM" src="https://github.com/user-attachments/assets/68f46183-1f9b-4e54-a265-674f48d1ee0a" /># Football Commentary System
-
 Real-time AI Football Game Master and Commentary System built with Orleans, SignalR, and the Aevatar Framework.
 
 ## Screenshots
