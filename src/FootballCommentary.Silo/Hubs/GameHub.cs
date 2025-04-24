@@ -141,6 +141,8 @@ namespace FootballCommentary.Silo.Hubs
         private static Dictionary<string, List<string>> _gameConnections = new();
         // Dictionary to map game IDs to grain IDs
         private static Dictionary<string, string> _gameToGrainMap = new();
+        private static readonly object _subscriptionLock = new object();
+        private static readonly Dictionary<string, StreamSubscriptionHandle<GameStateUpdate>> _gameStateSubscriptions = new();
 
         public GameHub(IClusterClient clusterClient, ILogger<GameHub> logger, IHubContext<GameHub> hubContext)
         {
@@ -232,13 +234,13 @@ namespace FootballCommentary.Silo.Hubs
                 if (gameState.HomeTeam?.Players == null || gameState.HomeTeam.Players.Count == 0)
                 {
                     _logger.LogWarning("Home team players list is null or empty for game {GameId}", gameId);
-                    gameState.HomeTeam.Players = new List<Player>();
+                    if (gameState.HomeTeam != null) gameState.HomeTeam.Players = new List<Player>();
                 }
                 
                 if (gameState.AwayTeam?.Players == null || gameState.AwayTeam.Players.Count == 0)
                 {
                     _logger.LogWarning("Away team players list is null or empty for game {GameId}", gameId);
-                    gameState.AwayTeam.Players = new List<Player>();
+                    if (gameState.AwayTeam != null) gameState.AwayTeam.Players = new List<Player>();
                 }
                 
                 // Send the current game state to the caller
@@ -256,7 +258,7 @@ namespace FootballCommentary.Silo.Hubs
                 _logger.LogInformation("Client {ConnectionId} joined game {GameId}", Context.ConnectionId, gameId);
                 
                 // Subscribe to game streams
-                await SubscribeToStreams(gameId);
+                SubscribeToStreams(gameId);
             }
             catch (Exception ex)
             {
@@ -357,6 +359,40 @@ namespace FootballCommentary.Silo.Hubs
                 CommentaryPollingManager.StopPolling(gameId);
 
                 await Clients.Group(gameId).SendAsync("GameStateUpdated", gameState);
+                
+                // Get commentary agent reference before calling it
+                var commentaryAgent = _clusterClient.GetGrain<ICommentaryAgent>(grainId);
+                await commentaryAgent.GenerateGameSummaryAsync(gameId);
+                
+                _logger.LogInformation("Game {GameId} ended by hub request.", gameId);
+                
+                // Optionally notify clients game has ended
+                await Clients.Group(gameId).SendAsync("GameEnded", gameId);
+                
+                // --- Unsubscribe from streams on game end --- 
+                StreamSubscriptionHandle<GameStateUpdate>? subscriptionHandle = null;
+                lock (_subscriptionLock)
+                {
+                    if (_gameStateSubscriptions.TryGetValue(gameId, out subscriptionHandle))
+                    {
+                        _gameStateSubscriptions.Remove(gameId);
+                    }
+                }
+                // Unsubscribe outside the lock
+                if (subscriptionHandle != null) 
+                {
+                    try 
+                    {
+                        await subscriptionHandle.UnsubscribeAsync();
+                        _logger.LogInformation("Successfully unsubscribed from GameState stream on EndGame for {GameId}", gameId);
+                    }
+                    catch (Exception unsubEx)
+                    {
+                         _logger.LogWarning(unsubEx, "Error unsubscribing from GameState stream on EndGame for {GameId}", gameId);
+                    }
+                }
+                CommentaryPollingManager.StopPolling(gameId); // Stop commentary polling too
+                 // -------------------------------------------
             }
             catch (Exception ex)
             {
@@ -431,7 +467,7 @@ namespace FootballCommentary.Silo.Hubs
             }
         }
 
-        private async Task SubscribeToStreams(string gameId)
+        private void SubscribeToStreams(string gameId)
         {
             try
             {
@@ -446,7 +482,7 @@ namespace FootballCommentary.Silo.Hubs
             }
         }
 
-        public async Task<FootballCommentary.Core.Models.GameState> GetGameState(string gameId)
+        public async Task<FootballCommentary.Core.Models.GameState?> GetGameState(string gameId)
         {
             try
             {

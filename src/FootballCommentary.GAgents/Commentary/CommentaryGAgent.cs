@@ -34,6 +34,7 @@ namespace FootballCommentary.GAgents.Commentary
         private readonly ILogger<CommentaryGAgent> _logger;
         private readonly ILLMService _llmService;
         private readonly IPersistentState<CommentaryGAgentState> _state;
+        private readonly IGrainFactory _grainFactory;
         private readonly Random _random = new Random();
         
         // Throttling settings
@@ -55,11 +56,13 @@ namespace FootballCommentary.GAgents.Commentary
         public CommentaryGAgent(
             ILogger<CommentaryGAgent> logger,
             ILLMService llmService,
-            [PersistentState("commentary", "Default")] IPersistentState<CommentaryGAgentState> state)
+            [PersistentState("commentary", "Default")] IPersistentState<CommentaryGAgentState> state,
+            IGrainFactory grainFactory)
         {
             _logger = logger;
             _llmService = llmService;
             _state = state;
+            _grainFactory = grainFactory;
         }
         
         public override async Task OnActivateAsync(CancellationToken cancellationToken)
@@ -88,12 +91,16 @@ namespace FootballCommentary.GAgents.Commentary
                 _logger.LogError(ex, "Error subscribing to streams: {Message}", ex.Message);
             }
             
-            // Start background commentary timer using simpler RegisterTimer method
-            _backgroundCommentaryTimer = this.RegisterTimer(
-                _ => GenerateBackgroundCommentaryAsync(this.GetPrimaryKeyString()),
-                null,
-                TimeSpan.FromMinutes(1),
-                TimeSpan.FromMinutes(3));
+            // Start background commentary timer using the newer RegisterGrainTimer
+            var timerOptions = new GrainTimerCreationOptions
+            {
+                DueTime = TimeSpan.FromMinutes(1),
+                Period = TimeSpan.FromMinutes(3),
+                Interleave = true // Allow timer callbacks to interleave with grain calls
+            };
+            _backgroundCommentaryTimer = this.RegisterGrainTimer(
+                async () => await GenerateBackgroundCommentaryAsync(this.GetPrimaryKeyString()),
+                timerOptions);
         }
         
         public override async Task OnDeactivateAsync(DeactivationReason reason, CancellationToken cancellationToken)
@@ -181,8 +188,37 @@ namespace FootballCommentary.GAgents.Commentary
             // Rebuild the game state from the update
             if (!_state.State.GameStates.TryGetValue(update.GameId, out var gameState))
             {
-                _logger.LogWarning("Received state update for unknown game: {GameId}", update.GameId);
-                return;
+                 _logger.LogWarning("Received state update for unknown game: {GameId}. Attempting to fetch state.", update.GameId);
+                 try 
+                 {
+                     // Get the GameStateAgent and fetch the full state
+                     var gameStateAgent = _grainFactory.GetGrain<IGameStateAgent>(this.GetPrimaryKeyString()); // Assuming GameId is the key
+                     var fullGameState = await gameStateAgent.GetGameStateAsync(update.GameId);
+                     if (fullGameState != null) 
+                     {
+                         // Initialize commentary with the fetched state
+                         await InitializeGameCommentaryAsync(update.GameId, fullGameState);
+                         gameState = fullGameState; // Use the fetched state
+                         _logger.LogInformation("Successfully fetched and initialized state for game {GameId}", update.GameId);
+                     }
+                     else 
+                     {
+                          _logger.LogError("Failed to fetch state for unknown game {GameId}. Update cannot be processed.", update.GameId);
+                          return; // Cannot proceed without state
+                     }
+                 }
+                 catch (Exception ex)
+                 {
+                     _logger.LogError(ex, "Error fetching state for unknown game {GameId}", update.GameId);
+                     return; // Cannot proceed
+                 }
+            }
+
+            // Ensure gameState is not null after potential fetching
+            if (gameState == null)
+            {
+                 _logger.LogError("GameState is null for game {GameId} after update/fetch attempt. Update cannot be processed.", update.GameId);
+                 return;
             }
             
             // Update ball position
@@ -194,9 +230,10 @@ namespace FootballCommentary.GAgents.Commentary
             // Update game time
             gameState.GameTime = update.GameTime;
             
-            // Save updated state
+            // Save updated state (redundant if InitializeGameCommentaryAsync saved?)
             _state.State.GameStates[update.GameId] = gameState;
-            await _state.WriteStateAsync();
+            // Consider removing this WriteStateAsync if InitializeGameCommentaryAsync always writes
+            // await _state.WriteStateAsync(); 
             
             // Process the game state update
             await ProcessGameStateUpdateAsync(gameState);

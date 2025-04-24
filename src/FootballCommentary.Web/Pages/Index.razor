@@ -137,26 +137,26 @@
                     double minutes = 0;
                     double seconds = 0;
                     
-                    if (state.GameTime != null)
+                    if (state?.GameTime != null)
                     {
                         minutes = state.GameTime.TotalMinutes;
                         seconds = state.GameTime.TotalSeconds % 60;
                     }
                     
-                    Console.WriteLine($"GameStateUpdated event received. Status={state.Status}, Game Time={minutes}:{seconds:00}");
+                    Console.WriteLine($"[Blazor] GameStateUpdated event received. Status={state?.Status}, Time={minutes}:{seconds:00}");
                     
                     // Debug player positions
-                    int playerCount = state.HomeTeam?.Players?.Count ?? 0;
-                    Console.WriteLine($"Home team player count: {playerCount}");
-                    if (state.HomeTeam?.Players != null && playerCount > 0)
+                    int homePlayerCount = state?.HomeTeam?.Players?.Count ?? 0;
+                    int awayPlayerCount = state?.AwayTeam?.Players?.Count ?? 0;
+                    Console.WriteLine($"[Blazor] Player Counts: Home={homePlayerCount}, Away={awayPlayerCount}");
+                    if (state?.HomeTeam?.Players != null && homePlayerCount > 0)
                     {
                         var player = state.HomeTeam.Players[0];
-                        Console.WriteLine($"Home player position: x={player.Position?.X}, y={player.Position?.Y}");
+                        Console.WriteLine($"[Blazor] Home player[0] pos: x={player?.Position?.X}, y={player?.Position?.Y}");
                     }
-                    
-                    if (state.Ball?.Position != null)
+                    if (state?.Ball?.Position != null)
                     {
-                        Console.WriteLine($"Ball position: x={state.Ball.Position.X}, y={state.Ball.Position.Y}");
+                        Console.WriteLine($"[Blazor] Ball position: x={state.Ball.Position.X}, y={state.Ball.Position.Y}");
                     }
                     
                     // Save the updated game state
@@ -165,12 +165,31 @@
                     // Update Blazor UI immediately
                     StateHasChanged();
 
-                    // *** ADDED: Call the JavaScript function to update its state ***
-                    await JSRuntime.InvokeVoidAsync("updateGameState", state);
+                    // Call the JavaScript function to update its state
+                    if (state != null) 
+                    {
+                        Console.WriteLine("[Blazor] Invoking JS: updateGameState...");
+                        await JSRuntime.InvokeVoidAsync("updateGameState", state);
+                        Console.WriteLine("[Blazor] JS: updateGameState invoked.");
+                    }
+                    else
+                    {
+                         Console.WriteLine("[Blazor] Skipping JS interop: state is null.");
+                    }
+                }
+                catch (JSException jsEx)
+                {
+                    // Catch specific JS interop exceptions
+                    Console.Error.WriteLine($"[Blazor] Error calling JS updateGameState: {jsEx.Message}");
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"Error handling GameStateUpdated: {ex.Message}");
+                    Console.Error.WriteLine($"[Blazor] Error handling GameStateUpdated: {ex.GetType().Name} - {ex.Message}");
+                     if (ex.InnerException != null)
+                     {
+                         Console.Error.WriteLine($"  Inner Exc: {ex.InnerException.GetType().Name} - {ex.InnerException.Message}");
+                     }
+                     Console.Error.WriteLine($"  State Object: {(state == null ? "NULL" : System.Text.Json.JsonSerializer.Serialize(state))}"); // Log state on error
                 }
             });
         });
@@ -459,31 +478,35 @@
 
     private void OnTimerElapsed(object? sender, ElapsedEventArgs e)
     {
-        if (!_isReconnecting && gameState != null && gameState.HomeTeam?.Players != null && gameState.AwayTeam?.Players != null)
+        if (!_isReconnecting && gameState != null)
         {
-            // Update the elapsed time
+            bool needsStateChange = false;
+
+            // Update the elapsed time ONLY if the game is in progress
             if (gameState.Status == GameStatus.InProgress)
             {
-                // Use GameTime property instead of ElapsedTime
                 if (gameState.GameTime == null)
                 {
                     gameState.GameTime = new TimeSpan();
                 }
                 gameState.GameTime += TimeSpan.FromSeconds(0.25); // 250ms update
-                
-                // Request latest game state if connected
-                if (hubConnection?.State == HubConnectionState.Connected && !string.IsNullOrEmpty(gameId))
+                needsStateChange = true;
+            }
+            
+            // Request latest game state if connected, regardless of status (to get updates after goal/reset)
+            // Reduce frequency slightly to avoid spamming when not InProgress
+            if (hubConnection?.State == HubConnectionState.Connected && !string.IsNullOrEmpty(gameId))
+            {
+                if (DateTime.Now.Millisecond < 100) // roughly once per second
                 {
-                    // Only request updates occasionally to reduce network traffic
-                    if (DateTime.Now.Millisecond < 250) // roughly once per second
-                    {
-                        _ = hubConnection.InvokeAsync("GetGameState", gameId);
-                    }
+                    _ = hubConnection.InvokeAsync("GetGameState", gameId);
                 }
-                
-                InvokeAsync(() => {
-                    StateHasChanged();
-                });
+            }
+            
+            // Only call InvokeAsync if time was updated
+            if (needsStateChange) 
+            {
+                 InvokeAsync(StateHasChanged);
             }
         }
     }

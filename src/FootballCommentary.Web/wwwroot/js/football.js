@@ -8,6 +8,7 @@ let ctx = null;
 let animationFrameId = null; // To potentially cancel the loop if needed
 let isInitialized = false; // Flag to track if canvas/animation loop is set up
 let animationFrameCounter = 0; // Counter for animation frames
+let goalCelebrationStart = null; // Time when goal celebration started
 
 // Helper function to draw a circle
 function drawCircle(ctx, x, y, radius, color) {
@@ -90,7 +91,7 @@ function renderGameField(canvas, gameState, currentAnimatedBallPosition) {
 
     // Log the state being rendered
     if (animationFrameCounter % 60 === 1) { // Log roughly once per second, offset from loop log
-         console.log(`Rendering Frame: ${animationFrameCounter}, Ball Possession: ${gameState.ballPossession}`);
+         console.log(`Rendering Frame: ${animationFrameCounter}, Ball Possession: ${gameState.ballPossession}, Status: ${gameState.status}`);
          if (gameState.homeTeam && gameState.homeTeam.players && gameState.homeTeam.players.length > 0) {
              const firstPlayer = gameState.homeTeam.players[0];
              console.log(`  First Home Player (${firstPlayer.playerId}) Pos: x=${firstPlayer.position?.x?.toFixed(3)}, y=${firstPlayer.position?.y?.toFixed(3)}`);
@@ -252,6 +253,42 @@ function animationLoop(timestamp) {
 
     let currentAnimatedBallPosition = null;
 
+    // Special handling for goal celebration (status = 4)
+    if (latestGameState.status === 4 && goalCelebrationStart) {
+        const elapsedCelebration = timestamp - goalCelebrationStart;
+        // Pulsating effect on the ball during celebration
+        const pulseScale = 1 + 0.3 * Math.sin(elapsedCelebration / 150); 
+        
+        // We'll draw the ball at the goal position but with a pulsing effect
+        renderGameField(canvas, latestGameState, null); // Render players and field
+        
+        // Draw a pulsating ball and optional "GOAL!" text
+        if (latestGameState.ball?.position) {
+            const goalX = latestGameState.ball.position.x * canvas.width;
+            const goalY = latestGameState.ball.position.y * canvas.height;
+            
+            // Pulsating ball
+            ctx.beginPath();
+            ctx.arc(goalX, goalY, 10 * pulseScale, 0, Math.PI * 2);
+            ctx.fillStyle = "yellow"; // Bright celebratory color
+            ctx.fill();
+            ctx.strokeStyle = "red";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            
+            // "GOAL!" text
+            ctx.font = "bold 48px Arial";
+            ctx.fillStyle = "red";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("GOAL!", canvas.width / 2, canvas.height / 2);
+        }
+        
+        // Request the next frame
+        animationFrameId = requestAnimationFrame(animationLoop);
+        return; // Skip the normal rendering path
+    }
+
     // Calculate ball position if a pass is in progress
     if (isPassing) {
         const elapsed = timestamp - passData.startTime;
@@ -277,8 +314,54 @@ function animationLoop(timestamp) {
     animationFrameId = requestAnimationFrame(animationLoop);
 }
 
-// Function to be called when new game state is received (e.g., from SignalR)
+/**
+ * Main handler for receiving game state updates from the server
+ * This can handle both SignalR push updates and direct responses from hub methods
+ */
 function updateGameState(newGameState) {
+    // Deep copy the incoming state to avoid potential reference issues
+    if (newGameState) {
+        try {
+            // Convert any custom types like GameStateUpdate to plain object
+            // By serializing and deserializing to JSON
+            if (typeof newGameState === 'object') {
+                // If it's a SignalR GameStateUpdate object (has different structure)
+                if (newGameState.hasOwnProperty('gameId') && 
+                    newGameState.hasOwnProperty('ballPosition') && 
+                    newGameState.hasOwnProperty('status')) {
+                    
+                    console.log("Received GameStateUpdate object, converting to GameState structure");
+                    
+                    // If we already have a state, just update the relevant parts
+                    if (latestGameState) {
+                        const updatedState = { ...latestGameState };
+                        updatedState.status = newGameState.status;
+                        
+                        // Update ball position if available
+                        if (newGameState.ballPosition && updatedState.ball) {
+                            updatedState.ball.position = newGameState.ballPosition;
+                        }
+                        
+                        // Update game time if available
+                        if (newGameState.gameTime) {
+                            updatedState.gameTime = newGameState.gameTime;
+                        }
+                        
+                        // Use the updated state for the rendering logic
+                        newGameState = updatedState;
+                    }
+                    // If this is the first update, it won't have enough info - wait for full state
+                    else {
+                        console.log("Ignoring GameStateUpdate without existing state");
+                        return;
+                    }
+                }
+            }
+        } catch (error) {
+            console.error("Error processing game state:", error);
+            return; // Skip processing this update if it caused an error
+        }
+    }
     
     // --- Initialize Canvas and Start Animation Loop ONCE --- 
     if (!isInitialized && newGameState) {
@@ -310,6 +393,25 @@ function updateGameState(newGameState) {
 
     // Store states for pass detection etc. (only if initialization succeeded or was already done)
     if (isInitialized) {
+        // --- Handle Game Status Changes ---
+        const prevStatus = latestGameState?.status;
+        const newStatus = newGameState?.status;
+        
+        // Check for GoalScored status (4)
+        if (newStatus === 4) { // GameStatus.GoalScored = 4
+            console.log("GOAL SCORED! Ball at position:", newGameState.ball.position.x, newGameState.ball.position.y);
+            // Keep track of goal celebration start time if this is the first GoalScored state
+            if (!goalCelebrationStart) {
+                goalCelebrationStart = performance.now();
+                console.log("Goal celebration started");
+            }
+        }
+        // When transitioning back from GoalScored to InProgress
+        else if (prevStatus === 4 && newStatus === 1) { // GoalScored to InProgress 
+            console.log("Goal celebration ended, game resuming at center");
+            goalCelebrationStart = null; // Reset celebration timer
+        }
+        
         previousGameState = latestGameState; // Store the old state for comparison
         latestGameState = newGameState;
 

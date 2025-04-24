@@ -24,6 +24,7 @@ namespace FootballCommentary.GAgents.GameState
     {
         [Id(0)] public Dictionary<string, FootballCommentary.Core.Models.GameState> Games { get; set; } = new();
         [Id(1)] public List<GameStateLogEvent> LogEvents { get; set; } = new();
+        [Id(2)] public Dictionary<string, int> GoalCelebrationTicks { get; set; } = new(); // Ticks remaining for goal celebration
     }
 
     public class GameStateGAgent : Grain, IGameStateAgent
@@ -404,11 +405,15 @@ namespace FootballCommentary.GAgents.GameState
             }
             
             // Create a new simulation timer that updates every 100ms
-            var timer = this.RegisterTimer(
-                async _ => await SimulateGameStepAsync(gameId),
-                null,
-                TimeSpan.FromMilliseconds(100),  // start after 100ms
-                TimeSpan.FromMilliseconds(100)); // run every 100ms
+            var timerOptions = new GrainTimerCreationOptions
+            {
+                DueTime = TimeSpan.FromMilliseconds(100),
+                Period = TimeSpan.FromMilliseconds(100),
+                Interleave = true // Allow timer callbacks to interleave with grain calls
+            };
+            var timer = this.RegisterGrainTimer(
+                async () => await SimulateGameStepAsync(gameId),
+                timerOptions);
             
             _gameSimulationTimers[gameId] = timer;
             _logger.LogInformation("Started game simulation for game {GameId}", gameId);
@@ -424,9 +429,67 @@ namespace FootballCommentary.GAgents.GameState
                     return;
                 }
                 
+                // Publish state update every 5 steps (moved earlier)
+                if (game.Status != GameStatus.NotStarted && game.SimulationStep % 5 == 0) // Don't publish before first step
+                {
+                    await PublishGameStateUpdateAsync(game);
+                }
+                
+                // --- Handle Goal Scored State --- 
+                if (game.Status == GameStatus.GoalScored)
+                {
+                    if (!_state.State.GoalCelebrationTicks.ContainsKey(gameId))
+                    {
+                        _state.State.GoalCelebrationTicks[gameId] = 20; // ~2 seconds delay (20 ticks * 100ms)
+                    }
+
+                    _state.State.GoalCelebrationTicks[gameId]--;
+
+                    if (_state.State.GoalCelebrationTicks[gameId] <= 0)
+                    {
+                        _logger.LogInformation("Goal celebration ended for {GameId}. Resetting ball.", gameId);
+                        // Reset ball to center
+                        game.Ball.Position = new Position { X = 0.5, Y = 0.5 };
+                        game.Ball.VelocityX = 0;
+                        game.Ball.VelocityY = 0;
+                        // Give possession to team that conceded (simple logic)
+                        var concedingTeam = game.LastScoringTeamId == "TeamA" ? game.AwayTeam : game.HomeTeam;
+                        if (concedingTeam != null && concedingTeam.Players != null && concedingTeam.Players.Any())
+                        {
+                             game.BallPossession = concedingTeam.Players[_random.Next(concedingTeam.Players.Count)].PlayerId;
+                        }
+                        else
+                        {
+                             _logger.LogWarning("Could not assign kickoff possession to team {TeamId}", concedingTeam?.TeamId);
+                             game.BallPossession = string.Empty; 
+                        }
+                        
+                        game.Status = GameStatus.InProgress; // Resume game
+                        _state.State.GoalCelebrationTicks.Remove(gameId);
+                        
+                        // --- IMPORTANT: Save the state transition *immediately* ---
+                        await _state.WriteStateAsync(); 
+                        // --- ALSO IMPORTANT: Publish the reset state *immediately* ---
+                        await PublishGameStateUpdateAsync(game); 
+                        // ----------------------------------------------------------
+
+                        // State is saved and published, now increment step and return
+                        game.SimulationStep++; 
+                        return; // Exit celebration logic
+                    }
+                    // else { /* Still celebrating, tick will be decremented below */ }
+
+                    // --- Save state ONLY if still celebrating --- 
+                    // We still need to increment simulation step even during celebration
+                    game.SimulationStep++; 
+                    await _state.WriteStateAsync(); // Save the decremented tick count
+                    return; // Skip normal player/ball movement simulation during goal celebration
+                }
+                // ----------------------------- 
+
                 if (game.Status != GameStatus.InProgress)
                 {
-                    return;
+                    return; // Not running or goal scored
                 }
                 
                 // Update game time
@@ -447,11 +510,13 @@ namespace FootballCommentary.GAgents.GameState
                 game.LastUpdateTime = DateTime.UtcNow;
                 await _state.WriteStateAsync();
                 
-                // Publish state update every 5 steps (500ms)
+                // Publish state update every 5 steps (500ms) - REMOVED from here
+                /* 
                 if (game.SimulationStep % 5 == 0)
                 {
                     await PublishGameStateUpdateAsync(game);
                 }
+                */
                 
                 // Publish game event if needed
                 if (publishEvent && gameEvent != null)
@@ -570,85 +635,171 @@ namespace FootballCommentary.GAgents.GameState
         {
             // Players move more dynamically when their team has possession
             
-            // 1. Calculate movement toward base position (formation adherence)
-            double dx = (basePosition.X - player.Position.X) * FORMATION_ADHERENCE;
-            double dy = (basePosition.Y - player.Position.Y) * FORMATION_ADHERENCE;
-            
-            // 2. Add forward movement bias for attacking team
-            double forwardBias = isTeamA ? PLAYER_SPEED * 0.4 : -PLAYER_SPEED * 0.4;
+            // Determine player role
+            int playerNumber = TryParsePlayerId(player.PlayerId) ?? 0;
+            bool isForward = playerNumber >= 9;
+
+            // 1. Calculate movement toward base position (Increased adherence, especially for forwards)
+            double adherenceWeight = FORMATION_ADHERENCE * (isForward ? 1.5 : 1.0); // Forwards stick to position more
+            double dx = (basePosition.X - player.Position.X) * adherenceWeight;
+            double dy = (basePosition.Y - player.Position.Y) * adherenceWeight;
+
+            // 2. Add forward movement bias for attacking team (Increased for forwards)
+            double forwardBias = PLAYER_SPEED * (isTeamA ? 1.0 : -1.0) * (isForward ? 0.8 : 0.4); // Stronger push for forwards
             dx += forwardBias;
-            
-            // 3. Movement toward creating space for passing lanes
+
+            // 3. Movement toward creating space / supporting player with ball
             if (playerWithBall != null)
             {
-                // Calculate vector from ball player to this player
-                double ballToPlayerX = player.Position.X - playerWithBall.Position.X;
-                double ballToPlayerY = player.Position.Y - playerWithBall.Position.Y;
-                
-                // Normalize the vector
-                double distance = Math.Sqrt(ballToPlayerX * ballToPlayerX + ballToPlayerY * ballToPlayerY);
-                
-                if (distance > 0 && distance < PASSING_DISTANCE)
+                double distToBall = Math.Sqrt(Math.Pow(player.Position.X - playerWithBall.Position.X, 2) + Math.Pow(player.Position.Y - playerWithBall.Position.Y, 2));
+
+                // If NOT a forward, try to offer a passing option if reasonably close
+                if (!isForward && distToBall > 0.1 && distToBall < PASSING_DISTANCE * 1.2)
                 {
-                    // Move to create better passing angles
-                    double moveX = ballToPlayerX / distance * PLAYER_SPEED * 0.5;
-                    double moveY = ballToPlayerY / distance * PLAYER_SPEED * 0.5;
-                    
-                    // Adjust to maintain forward progress
-                    moveX = isTeamA ? Math.Max(0, moveX) : Math.Min(0, moveX);
-                    
-                    dx += moveX;
-                    dy += moveY;
+                    // Move slightly towards the ball carrier to support
+                    dx += (playerWithBall.Position.X - player.Position.X) * PLAYER_SPEED * 0.2;
+                    dy += (playerWithBall.Position.Y - player.Position.Y) * PLAYER_SPEED * 0.2;
+                }
+                 // If a forward, try to move into attacking space ahead of the ball
+                else if (isForward)
+                {
+                    double targetX = isTeamA ? Math.Max(player.Position.X, playerWithBall.Position.X + 0.1) : Math.Min(player.Position.X, playerWithBall.Position.X - 0.1);
+                    targetX = isTeamA ? Math.Min(targetX, 0.9) : Math.Max(targetX, 0.1); // Stay within bounds
+
+                    dx += (targetX - player.Position.X) * PLAYER_SPEED * 0.6; // Move towards attacking space
+                    // Add slight lateral movement to find space
+                    dy += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.4;
                 }
             }
-            
+
             // 4. Avoid clustering with teammates
             AvoidTeammates(game, player, ref dx, ref dy, isTeamA);
-            
+
             // 5. Add small random movement for naturalism
             dx += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.3;
             dy += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.3;
-            
+
             // Apply movement with boundary checking
             player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
             player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
         }
         
         private void MovePlayerWhenOpponentHasPossession(
-            FootballCommentary.Core.Models.GameState game, 
-            Player player, 
-            Player? playerWithBall, 
+            FootballCommentary.Core.Models.GameState game,
+            Player player,
+            Player? playerWithBall,
             Position basePosition,
             bool isTeamA)
         {
             // Defensive movement when the opponent has possession
-            
-            // 1. Move toward defensive position
-            double defX = isTeamA ? 0.3 : 0.7; // Defensive line position
-            double dx = (defX - player.Position.X) * POSITION_RECOVERY_WEIGHT;
-            double dy = (basePosition.Y - player.Position.Y) * POSITION_RECOVERY_WEIGHT;
-            
-            // 2. Add attraction to the ball when it's close
-            if (playerWithBall != null)
+
+            double dx = 0;
+            double dy = 0;
+
+            Position targetPos = playerWithBall?.Position ?? game.Ball.Position; // Target the player or the ball itself
+            int playerNumber = TryParsePlayerId(player.PlayerId) ?? 0;
+            bool isDefenderOrMidfielder = playerNumber >= 2 && playerNumber <= 8;
+
+            if (isDefenderOrMidfielder)
             {
-                double distToBall = Math.Sqrt(
-                    Math.Pow(player.Position.X - game.Ball.Position.X, 2) +
-                    Math.Pow(player.Position.Y - game.Ball.Position.Y, 2));
-                
-                if (distToBall < OPPONENT_AWARENESS_DISTANCE)
+                // Check if defender should press based on zone
+                bool shouldPressHigh = true;
+                if (isTeamA)
                 {
-                    double ballBiasX = (game.Ball.Position.X - player.Position.X) * BALL_ATTRACTION_WEIGHT;
-                    double ballBiasY = (game.Ball.Position.Y - player.Position.Y) * BALL_ATTRACTION_WEIGHT;
-                    
-                    dx += ballBiasX;
-                    dy += ballBiasY;
+                    // Defenders/Midfielders are less likely to press high up the pitch
+                    double opponentHalfLine = 0.6;
+                    if (targetPos.X > opponentHalfLine)
+                    {
+                        if (_random.NextDouble() > 0.3) // 70% chance to not press high
+                        {
+                            shouldPressHigh = false;
+                        }
+                    }
+                }
+                else
+                {
+                    // Defenders/Midfielders are less likely to press high up the pitch
+                    double opponentHalfLine = 0.4;
+                    if (targetPos.X < opponentHalfLine)
+                    {
+                        if (_random.NextDouble() > 0.3) // 70% chance to not press high
+                        {
+                            shouldPressHigh = false;
+                        }
+                    }
+                }
+
+                if (shouldPressHigh)
+                {
+                    // 1. Strong attraction to the ball carrier
+                    const double DEFENSIVE_BALL_ATTRACTION = 0.12;
+                    const double TACKLE_DISTANCE = 0.05;
+                    const double TACKLE_PROBABILITY = 0.35; // Increased tackle chance slightly more
+
+                    double distToTarget = Math.Sqrt(
+                        Math.Pow(player.Position.X - targetPos.X, 2) +
+                        Math.Pow(player.Position.Y - targetPos.Y, 2));
+
+                    // Move towards the target (ball/player)
+                    dx += (targetPos.X - player.Position.X) / (distToTarget + 0.01) * DEFENSIVE_BALL_ATTRACTION;
+                    dy += (targetPos.Y - player.Position.Y) / (distToTarget + 0.01) * DEFENSIVE_BALL_ATTRACTION;
+
+                    // 2. Attempt Tackle if close enough
+                    if (playerWithBall != null && distToTarget < TACKLE_DISTANCE)
+                    {
+                        if (_random.NextDouble() < TACKLE_PROBABILITY)
+                        {
+                            _logger.LogInformation("TACKLE! Player {DefenderId} tackles {AttackerId}", player.PlayerId, playerWithBall.PlayerId);
+                            game.BallPossession = string.Empty; // Ball becomes loose
+                            double tackleVelX = (_random.NextDouble() - 0.5) * 0.03; // Slightly more impactful velocity
+                            double tackleVelY = (_random.NextDouble() - 0.5) * 0.03;
+                            game.Ball.VelocityX = tackleVelX;
+                            game.Ball.VelocityY = tackleVelY;
+                            // --- IMMEDIATELY UPDATE BALL POSITION ON TACKLE ---
+                            game.Ball.Position.X = Math.Clamp(playerWithBall.Position.X + tackleVelX, 0, 1);
+                            game.Ball.Position.Y = Math.Clamp(playerWithBall.Position.Y + tackleVelY, 0, 1);
+                            // -------------------------------------------------
+                        }
+                    }
+                }
+                else // If active defender decides not to press high
+                {
+                     // Fall back to passive logic (maintain position)
+                     dx += (basePosition.X - player.Position.X) * POSITION_RECOVERY_WEIGHT * 2.0; // Stronger recovery
+                     dy += (basePosition.Y - player.Position.Y) * POSITION_RECOVERY_WEIGHT * 2.0;
                 }
             }
-            
-            // 3. Add small random movement for naturalism
+            else
+            {
+                // --- Passive Defender Logic (Others) ---
+                // 1. Move strongly toward base defensive position
+                dx += (basePosition.X - player.Position.X) * POSITION_RECOVERY_WEIGHT * 2.5; // Increased significantly
+                dy += (basePosition.Y - player.Position.Y) * POSITION_RECOVERY_WEIGHT * 2.5; // Increased significantly
+
+                // 2. Very weak attraction to the ball, only if in own half
+                double ownHalfLine = isTeamA ? 0.5 : 0.5;
+                bool ballInOwnHalf = (isTeamA && targetPos.X < ownHalfLine) || (!isTeamA && targetPos.X > ownHalfLine);
+
+                if (ballInOwnHalf)
+                {
+                    const double PASSIVE_BALL_ATTRACTION = 0.01; // Very low attraction
+                    double distToTarget = Math.Sqrt(
+                       Math.Pow(player.Position.X - targetPos.X, 2) +
+                       Math.Pow(player.Position.Y - targetPos.Y, 2));
+
+                    // Move slightly towards the target
+                    dx += (targetPos.X - player.Position.X) / (distToTarget + 0.01) * PASSIVE_BALL_ATTRACTION;
+                    dy += (targetPos.Y - player.Position.Y) / (distToTarget + 0.01) * PASSIVE_BALL_ATTRACTION;
+                }
+
+                // 3. Avoid teammates (important for maintaining formation)
+                AvoidTeammates(game, player, ref dx, ref dy, isTeamA);
+            }
+
+            // 4. Add small random movement for naturalism (apply to both active/passive)
             dx += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.2;
             dy += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.2;
-            
+
             // Apply movement with boundary checking
             player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
             player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
@@ -742,18 +893,17 @@ namespace FootballCommentary.GAgents.GameState
             
             // Decide what this player should do with the ball
             // If close to goal, shoot
-            bool canShoot = false;
             double goalPostX = isTeamA ? GOAL_POST_X_TEAM_B : GOAL_POST_X_TEAM_A;
             double distanceToGoal = Math.Abs(playerWithBall.Position.X - goalPostX);
             
             if (distanceToGoal < SHOOTING_DISTANCE)
             {
-                canShoot = true;
-                
                 // Try to score
                 if (_random.NextDouble() < 0.4) // 40% chance to score when shooting
                 {
+                    // --- GOAL LOGIC --- 
                     // Goal!
+                    string scoringTeamId = isTeamA ? "TeamA" : "TeamB";
                     if (isTeamA)
                     {
                         game.HomeTeam.Score++;
@@ -762,18 +912,25 @@ namespace FootballCommentary.GAgents.GameState
                     {
                         game.AwayTeam.Score++;
                     }
-                    
-                    // Reset ball and positions
-                    game.Ball.Position = new Position { X = 0.5, Y = 0.5 };
-                    game.BallPossession = string.Empty;
-                    
+
+                    _logger.LogInformation("GOAL!!! Team {ScoringTeam} scored. Score: {HomeScore}-{AwayScore}", 
+                        scoringTeamId, game.HomeTeam.Score, game.AwayTeam.Score);
+
+                    // Set ball position TO THE GOAL, not center yet
+                    game.Ball.Position = new Position { X = goalPostX, Y = 0.5 }; 
+                    game.BallPossession = string.Empty; // No one possesses during celebration
+                    game.Ball.VelocityX = 0;
+                    game.Ball.VelocityY = 0;
+                    game.Status = GameStatus.GoalScored; // Enter goal scored state
+                    game.LastScoringTeamId = scoringTeamId; // Remember who scored for reset
+
                     // Publish goal event
                     publishEvent = true;
                     gameEvent = new GameEvent
                     {
                         GameId = game.GameId,
                         EventType = GameEventType.Goal,
-                        TeamId = isTeamA ? "TeamA" : "TeamB",
+                        TeamId = scoringTeamId,
                         PlayerId = TryParsePlayerId(playerWithBall.PlayerId),
                         Position = new Position { X = goalPostX, Y = 0.5 }
                     };

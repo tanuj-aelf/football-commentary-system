@@ -10,7 +10,8 @@ namespace FootballCommentary.Core.Models
         [Id(0)] NotStarted,
         [Id(1)] InProgress,
         [Id(2)] Paused,
-        [Id(3)] Ended
+        [Id(3)] Ended,
+        [Id(4)] GoalScored
     }
 
     [GenerateSerializer]
@@ -25,7 +26,8 @@ namespace FootballCommentary.Core.Models
         [Id(6)] Tackle,
         [Id(7)] OutOfBounds,
         [Id(8)] Foul,
-        [Id(9)] StateUpdate
+        [Id(9)] StateUpdate,
+        [Id(10)] PossessionLost
     }
 
     [GenerateSerializer]
@@ -88,6 +90,7 @@ namespace FootballCommentary.Core.Models
         [Id(7)] public DateTime GameStartTime { get; set; } = DateTime.UtcNow;
         [Id(8)] public string BallPossession { get; set; } = string.Empty;
         [Id(9)] public int SimulationStep { get; set; } = 0;
+        [Id(10)] public string? LastScoringTeamId { get; set; }
     }
 
     [Immutable]
