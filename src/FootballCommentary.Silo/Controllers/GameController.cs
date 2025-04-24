@@ -132,7 +132,7 @@ namespace FootballCommentary.Silo.Controllers
             try
             {
                 var gameStateAgent = _clusterClient.GetGrain<IGameStateAgent>(gameId);
-                await gameStateAgent.SimulateGoalAsync(gameId, request.TeamId);
+                await gameStateAgent.SimulateGoalAsync(gameId, request.TeamId, request.PlayerId);
                 
                 var gameState = await gameStateAgent.GetGameStateAsync(gameId);
                 return Ok(gameState);
@@ -175,5 +175,6 @@ namespace FootballCommentary.Silo.Controllers
     public class GoalRequest
     {
         public required string TeamId { get; set; }
+        public required int PlayerId { get; set; }
     }
 } 

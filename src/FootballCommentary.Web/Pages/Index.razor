@@ -84,6 +84,45 @@
                         }
                     </div>
                 </div>
+
+                <div class="stats-container">
+                    <h3>Goal Scorers</h3>
+                    <div class="goal-scorers">
+                        @if (goalScorers.Count > 0)
+                        {
+                            <table class="table table-sm">
+                                <thead>
+                                    <tr>
+                                        <th>Player</th>
+                                        <th>Team</th>
+                                        <th>#</th>
+                                        <th>Goals</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var scorer in goalScorers.OrderByDescending(s => s.GoalCount))
+                                    {
+                                        <tr>
+                                            <td>@scorer.PlayerName</td>
+                                            <td>
+                                                <span class="team-indicator @(scorer.Team == "TeamA" ? "team-home" : "team-away")">
+                                                    @(scorer.Team == "TeamA" ? teamA : teamB)
+                                                </span>
+                                            </td>
+                                            <td>@scorer.JerseyNumber</td>
+                                            <td><span class="goal-count">@scorer.GoalCount</span></td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        }
+                        else
+                        {
+                            <p>No goals scored yet</p>
+                        }
+                        <button class="btn btn-sm btn-outline-info" @onclick="AddTestGoalScorer">Debug: Add Test Goal</button>
+                    </div>
+                </div>
             </div>
         </div>
     }
@@ -99,6 +138,7 @@
     private bool isCreating = false;
     private GameState gameState = new();
     private List<CommentaryMessage> commentaryMessages = new();
+    private List<GoalScorer> goalScorers = new List<GoalScorer>();
     private Timer? gameTimer;
     private CancellationTokenSource _connectionCts = new CancellationTokenSource();
     private readonly int _maxRetryAttempts = 5;
@@ -107,6 +147,16 @@
     private bool hasJoinedGame = false;
     private bool inLobby = true;
     private bool disposedValue = false;
+
+    // Goal scorer class to track stats
+    private class GoalScorer
+    {
+        public string PlayerId { get; set; } = string.Empty;
+        public string PlayerName { get; set; } = string.Empty;
+        public string Team { get; set; } = string.Empty;
+        public int JerseyNumber { get; set; }
+        public int GoalCount { get; set; } = 0;
+    }
 
     protected override async Task OnInitializedAsync()
     {
@@ -149,6 +199,43 @@
                     }
                     
                     Console.WriteLine($"[Blazor] GameStateUpdated event received. Status={state?.Status}, Time={minutes}:{seconds:00}");
+                    
+                    // Check if a goal was just scored (status is GoalScored)
+                    if (state?.Status == GameStatus.GoalScored && gameState?.Status != GameStatus.GoalScored)
+                    {
+                        Console.WriteLine("[Blazor] Goal scored detected from GameStateUpdated");
+                        string scoringTeam = state.LastScoringTeamId ?? (state.HomeTeam.Score > (gameState?.HomeTeam?.Score ?? 0) ? "TeamA" : "TeamB");
+                        
+                        // Create a fallback game event if the GameEventOccurred event wasn't received
+                        if (scoringTeam != null)
+                        {
+                            int playerId = 9; // Default to player 9 as fallback
+                            if (scoringTeam == "TeamA" && state.HomeTeam.Players.Any())
+                            {
+                                // Try to get a reasonable player that might have scored
+                                playerId = int.TryParse(state.HomeTeam.Players.FirstOrDefault()?.PlayerId?.Split('_').LastOrDefault(), out var id) ? id : 9;
+                            }
+                            else if (scoringTeam == "TeamB" && state.AwayTeam.Players.Any())
+                            {
+                                playerId = int.TryParse(state.AwayTeam.Players.FirstOrDefault()?.PlayerId?.Split('_').LastOrDefault(), out var id) ? id : 9;
+                            }
+                            
+                            Console.WriteLine($"[Blazor] Creating fallback goal event for {scoringTeam} player {playerId}");
+                            
+                            // Create a fallback game event
+                            var goalEvent = new GameEvent
+                            {
+                                GameId = gameId,
+                                EventType = GameEventType.Goal,
+                                TeamId = scoringTeam,
+                                PlayerId = playerId,
+                                Position = new Position { X = 0.5, Y = 0.5 }
+                            };
+                            
+                            // Manually update goal scorer
+                            await UpdateGoalScorer(goalEvent);
+                        }
+                    }
                     
                     // Debug player positions
                     int homePlayerCount = state?.HomeTeam?.Players?.Count ?? 0;
@@ -294,6 +381,27 @@
             Console.WriteLine($"Error: {message}");
             isCreating = false;
             StateHasChanged();
+        });
+
+        hubConnection.On<GameEvent>("GameEventOccurred", async (gameEvent) =>
+        {
+            if (gameEvent.GameId != gameId) return;
+            
+            Console.WriteLine($"Game event received: {gameEvent.EventType} by {gameEvent.TeamId} player {gameEvent.PlayerId}");
+            
+            if (gameEvent.EventType == GameEventType.Goal && gameEvent.PlayerId.HasValue)
+            {
+                Console.WriteLine($"Goal scored by {gameEvent.TeamId} player {gameEvent.PlayerId}");
+                Console.WriteLine($"Debug: current goalScorers count = {goalScorers.Count}");
+                
+                // Update goal scorers list
+                await UpdateGoalScorer(gameEvent);
+                
+                Console.WriteLine($"Debug: updated goalScorers count = {goalScorers.Count}");
+                
+                // Force state update right after goal
+                StateHasChanged();
+            }
         });
     }
 
@@ -544,7 +652,7 @@
             commentaryMessages.Add(new CommentaryMessage { Text = "Please enter a game ID to join.", Timestamp = DateTime.UtcNow });
             return;
         }
-
+        
         try
         {
             Console.WriteLine($"Attempting to join game with ID: {gameId}");
@@ -567,9 +675,13 @@
                 }
             }
             
+            // Reset the goal scorers list when joining a new game
+            goalScorers.Clear();
+            
             Console.WriteLine($"Sending JoinGame request to hub for game ID: {gameId}");
             await hubConnection.SendAsync("JoinGame", gameId);
             Console.WriteLine($"JoinGame request sent successfully");
+            
             hasJoinedGame = true;
             inLobby = false;
             commentaryMessages.Clear();
@@ -636,16 +748,89 @@
 
     private async Task SimulateGoal(string teamId)
     {
-        if (hubConnection is not null && hubConnection.State == HubConnectionState.Connected && isGameCreated)
+        if (hubConnection is null) return;
+        
+        try
         {
-            try
+            // First determine which player to credit with the goal
+            int playerId = new Random().Next(1, 11); // Random player between 1 and 11
+            
+            await hubConnection.SendAsync("SimulateGoal", gameId, teamId, playerId);
+            
+            // Also update local goalScorers list for immediate UI feedback
+            var gameEvent = new GameEvent
             {
-                await hubConnection.SendAsync("SimulateGoal", gameId, teamId);
-            }
-            catch (Exception ex)
+                GameId = gameId,
+                EventType = GameEventType.Goal,
+                TeamId = teamId,
+                PlayerId = playerId
+            };
+            
+            await UpdateGoalScorer(gameEvent);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error simulating goal: {ex.Message}");
+        }
+    }
+
+    private async Task UpdateGoalScorer(GameEvent gameEvent)
+    {
+        try
+        {
+            Console.WriteLine($"UpdateGoalScorer called with event type {gameEvent.EventType} and player {gameEvent.PlayerId}");
+            
+            await InvokeAsync(() =>
             {
-                Console.WriteLine($"Error simulating goal: {ex.Message}");
-            }
+                if (gameEvent.PlayerId.HasValue)
+                {
+                    // Get player name using PlayerData class
+                    string playerName = FootballCommentary.Core.Models.PlayerData.GetPlayerName(gameEvent.TeamId, gameEvent.PlayerId.Value);
+                    Console.WriteLine($"Updating goal scorer: {playerName} from team {gameEvent.TeamId} with jersey #{gameEvent.PlayerId.Value}");
+                    
+                    var existingScorer = goalScorers.FirstOrDefault(s => 
+                        s.PlayerId == $"{gameEvent.TeamId}_{gameEvent.PlayerId.Value}");
+                    
+                    if (existingScorer != null)
+                    {
+                        // Increment goal count for existing scorer
+                        existingScorer.GoalCount++;
+                        Console.WriteLine($"Incremented goal count for {existingScorer.PlayerName} to {existingScorer.GoalCount}");
+                    }
+                    else
+                    {
+                        // Add new goal scorer
+                        int jerseyNumber = gameEvent.PlayerId.Value;
+                        
+                        var newScorer = new GoalScorer
+                        {
+                            PlayerId = $"{gameEvent.TeamId}_{gameEvent.PlayerId.Value}",
+                            PlayerName = playerName,
+                            Team = gameEvent.TeamId,
+                            JerseyNumber = jerseyNumber,
+                            GoalCount = 1
+                        };
+                        
+                        goalScorers.Add(newScorer);
+                        Console.WriteLine($"Added new goal scorer: {newScorer.PlayerName} with jersey #{newScorer.JerseyNumber}");
+                    }
+                    
+                    // Print current goal scorers for debugging
+                    Console.WriteLine($"Current goal scorers (count: {goalScorers.Count}):");
+                    foreach (var scorer in goalScorers)
+                    {
+                        Console.WriteLine($"  - {scorer.PlayerName} ({scorer.Team}) #{scorer.JerseyNumber}: {scorer.GoalCount} goals");
+                    }
+                    
+                    // Force UI update
+                    StateHasChanged();
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error updating goal scorer: {ex.Message}");
+            Console.Error.WriteLine(ex.StackTrace);
         }
     }
 
@@ -764,5 +949,24 @@
         int seconds = gameTime.Value.Seconds;
         
         return $"{minutes}:{seconds:D2}";
+    }
+
+    private void AddTestGoalScorer()
+    {
+        // Add a test goal scorer for debugging UI issues
+        var testScorer = new GoalScorer
+        {
+            PlayerId = "TestTeam_7",
+            PlayerName = "Test Player",
+            Team = "TeamA",
+            JerseyNumber = 7,
+            GoalCount = 1
+        };
+        
+        goalScorers.Add(testScorer);
+        Console.WriteLine($"Added test goal scorer. Current count: {goalScorers.Count}");
+        
+        // Force UI update
+        StateHasChanged();
     }
 } 

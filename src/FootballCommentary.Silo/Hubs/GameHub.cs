@@ -434,7 +434,7 @@ namespace FootballCommentary.Silo.Hubs
             }
         }
 
-        public async Task SimulateGoal(string gameId, string teamId)
+        public async Task SimulateGoal(string gameId, string teamId, int playerId)
         {
             try
             {
@@ -445,8 +445,10 @@ namespace FootballCommentary.Silo.Hubs
                     return;
                 }
                 
+                _logger.LogInformation("Simulating goal for game {GameId}, team {TeamId}, player {PlayerId}", gameId, teamId, playerId);
+                
                 var gameStateAgent = _clusterClient.GetGrain<IGameStateAgent>(grainId);
-                await gameStateAgent.SimulateGoalAsync(gameId, teamId);
+                await gameStateAgent.SimulateGoalAsync(gameId, teamId, playerId);
                 
                 // Get updated game state and send to clients
                 var gameState = await gameStateAgent.GetGameStateAsync(gameId);
@@ -459,6 +461,25 @@ namespace FootballCommentary.Silo.Hubs
                 {
                     await Clients.Group(gameId).SendAsync("ReceiveCommentary", recentCommentary[0]);
                 }
+                
+                // Create and broadcast game event
+                var gameEvent = new GameEvent
+                {
+                    GameId = gameId,
+                    EventType = GameEventType.Goal,
+                    TeamId = teamId,
+                    PlayerId = playerId,
+                    Position = new Position { X = teamId == "TeamA" ? 1.0 : 0.0, Y = 0.5 },
+                    Timestamp = DateTime.UtcNow
+                };
+                
+                _logger.LogInformation("Broadcasting goal event to clients in group {GameId}", gameId);
+                await Clients.Group(gameId).SendAsync("GameEventOccurred", gameEvent);
+                
+                // Log the player name from PlayerData
+                string playerName = FootballCommentary.Core.Models.PlayerData.GetPlayerName(teamId, playerId);
+                _logger.LogInformation("Goal scored by {PlayerName} (ID: {PlayerId}) for team {TeamId}", 
+                    playerName, playerId, teamId);
             }
             catch (Exception ex)
             {

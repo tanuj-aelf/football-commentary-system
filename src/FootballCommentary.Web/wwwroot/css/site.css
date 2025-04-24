@@ -171,4 +171,59 @@ main {
     margin: 0;
     font-family: monospace;
     font-size: 2rem;
+}
+
+.stats-container {
+    background-color: #f8f9fa;
+    padding: 1rem;
+    border-radius: 5px;
+    box-shadow: 0 0 5px rgba(0, 0, 0, 0.1);
+    margin-top: 1.5rem;
+}
+
+.stats-container h3 {
+    margin-bottom: 0.75rem;
+    font-size: 1.25rem;
+}
+
+.goal-scorers table {
+    width: 100%;
+    margin-bottom: 0;
+}
+
+.goal-scorers th {
+    font-size: 0.85rem;
+    color: #666;
+}
+
+.goal-scorers td {
+    font-size: 0.9rem;
+}
+
+.team-indicator {
+    display: inline-block;
+    padding: 0.2rem 0.5rem;
+    border-radius: 3px;
+    font-size: 0.85rem;
+    color: white;
+}
+
+.team-home {
+    background-color: #FF0000;
+}
+
+.team-away {
+    background-color: #0000FF;
+}
+
+.goal-count {
+    display: inline-block;
+    font-weight: bold;
+    background-color: #28a745;
+    color: white;
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    line-height: 24px;
+    text-align: center;
 } 

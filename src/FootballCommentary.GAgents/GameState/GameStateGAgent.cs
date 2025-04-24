@@ -259,7 +259,7 @@ namespace FootballCommentary.GAgents.GameState
             await PublishGameStateUpdateAsync(game);
         }
         
-        public async Task SimulateGoalAsync(string gameId, string teamId)
+        public async Task SimulateGoalAsync(string gameId, string teamId, int playerId)
         {
             if (!_state.State.Games.TryGetValue(gameId, out var game))
             {
@@ -270,10 +270,16 @@ namespace FootballCommentary.GAgents.GameState
             if (teamId == "TeamA")
             {
                 game.HomeTeam.Score++;
+                _logger.LogInformation("Goal scored by {TeamName} player {PlayerId} - {PlayerName}. New score: {HomeScore}-{AwayScore}", 
+                    game.HomeTeam.Name, playerId, PlayerData.GetPlayerName(teamId, playerId),
+                    game.HomeTeam.Score, game.AwayTeam.Score);
             }
             else if (teamId == "TeamB")
             {
                 game.AwayTeam.Score++;
+                _logger.LogInformation("Goal scored by {TeamName} player {PlayerId} - {PlayerName}. New score: {HomeScore}-{AwayScore}", 
+                    game.AwayTeam.Name, playerId, PlayerData.GetPlayerName(teamId, playerId),
+                    game.HomeTeam.Score, game.AwayTeam.Score);
             }
             
             // Reset ball position
@@ -291,7 +297,7 @@ namespace FootballCommentary.GAgents.GameState
                 GameId = gameId,
                 EventType = GameEventType.Goal,
                 TeamId = teamId,
-                PlayerId = TryParsePlayerId(game.BallPossession),
+                PlayerId = playerId,
                 Position = new Position { X = teamId == "TeamA" ? GOAL_POST_X_TEAM_B : GOAL_POST_X_TEAM_A, Y = 0.5 }
             });
             

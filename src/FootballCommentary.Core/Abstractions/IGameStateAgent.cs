@@ -34,7 +34,7 @@ namespace FootballCommentary.Core.Abstractions
         /// <summary>
         /// Simulates a goal for the specified team
         /// </summary>
-        Task SimulateGoalAsync(string gameId, string teamId);
+        Task SimulateGoalAsync(string gameId, string teamId, int playerId);
         
         /// <summary>
         /// Updates player positions
