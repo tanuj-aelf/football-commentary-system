@@ -114,19 +114,23 @@
         
         hubConnection.On<GameState>("ReceiveGameState", async (state) =>
         {
-            await InvokeAsync(() =>
+            gameState = state;
+            // Update team scores if available
+            if (state.HomeTeam != null && state.AwayTeam != null)
             {
-                gameState = state;
-                StateHasChanged();
-                
-                // Render game state on canvas
-                UpdateCanvas();
-            });
+                teamA = state.HomeTeam.Name;
+                teamB = state.AwayTeam.Name;
+            }
+
+            await InvokeAsync(StateHasChanged); // Update the Blazor component UI
+
+            // Call the JavaScript function to update the canvas and handle animations
+            await JSRuntime.InvokeVoidAsync("updateGameState", state);
         });
         
         hubConnection.On<GameState>("GameStateUpdated", async (state) =>
         {
-            await InvokeAsync(() =>
+            await InvokeAsync(async () =>
             {
                 try 
                 {
@@ -158,11 +162,11 @@
                     // Save the updated game state
                     gameState = state;
                     
-                    // Update UI immediately
+                    // Update Blazor UI immediately
                     StateHasChanged();
-                    
-                    // Force a canvas update
-                    UpdateCanvas();
+
+                    // *** ADDED: Call the JavaScript function to update its state ***
+                    await JSRuntime.InvokeVoidAsync("updateGameState", state);
                 }
                 catch (Exception ex)
                 {
@@ -186,7 +190,6 @@
                         if (player != null)
                         {
                             player.Position = position;
-                            UpdateCanvas();
                             return;
                         }
                     }
@@ -197,7 +200,6 @@
                         if (player != null)
                         {
                             player.Position = position;
-                            UpdateCanvas();
                             return;
                         }
                     }
@@ -220,7 +222,6 @@
                     if (gameState?.Ball != null)
                     {
                         gameState.Ball.Position = position;
-                        UpdateCanvas();
                     }
                 }
                 catch (Exception ex)
@@ -481,7 +482,6 @@
                 }
                 
                 InvokeAsync(() => {
-                    UpdateCanvas(); // Update UI asynchronously
                     StateHasChanged();
                 });
             }
@@ -672,20 +672,6 @@
         {
             StateHasChanged();
         }
-    }
-
-    private void UpdateCanvas()
-    {
-        if (gameState == null)
-            return;
-
-        Console.WriteLine($"Updating canvas with {gameState.HomeTeam?.Players?.Count ?? 0} home players and {gameState.AwayTeam?.Players?.Count ?? 0} away players");
-        
-        // Use the renamed function to avoid conflicts
-        JSRuntime.InvokeVoidAsync("renderGameFieldFromRenderGameFieldJs", gameCanvas, gameState);
-        
-        // Force UI update
-        StateHasChanged();
     }
 
     public async ValueTask DisposeAsync()

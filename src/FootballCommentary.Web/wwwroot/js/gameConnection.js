@@ -1,7 +1,8 @@
 // Global variable to store the current game state
-let currentGameState = null;
+// let currentGameState = null; // No longer needed here, managed in football.js
 
 // Render the game field on the canvas
+/* // REMOVED - Rendering is handled by football.js animation loop
 function renderGameField(canvas, gameState) {
     if (!canvas || !gameState) return;
     
@@ -85,8 +86,10 @@ function renderGameField(canvas, gameState) {
         });
     }
 }
+*/
 
 // New function to update game canvas (called from Blazor)
+/* // REMOVED - Rendering is handled by football.js animation loop
 function updateGameCanvas(canvas, homePlayers, awayPlayers, ball) {
     if (!canvas) return;
     
@@ -189,6 +192,7 @@ function updateGameCanvas(canvas, homePlayers, awayPlayers, ball) {
     
     console.log("Canvas updated with new game state");
 }
+*/
 
 // Draw the football field
 function drawField(ctx, width, height) {
