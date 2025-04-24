@@ -23,19 +23,35 @@ namespace FootballCommentary.GAgents.Services
             _logger = logger;
             _httpClient = httpClientFactory.CreateClient("GeminiApi");
             
-            _apiKey = configuration["GOOGLE_GEMINI_API_KEY"] ?? 
-                      Environment.GetEnvironmentVariable("GOOGLE_GEMINI_API_KEY") ?? 
+            string configApiKey = configuration["GOOGLE_GEMINI_API_KEY"];
+            string envApiKey = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_API_KEY");
+            _apiKey = configApiKey ?? envApiKey ??
                       string.Empty;
             
-            _modelName = configuration["GOOGLE_GEMINI_MODEL"] ?? 
-                         Environment.GetEnvironmentVariable("GOOGLE_GEMINI_MODEL") ?? 
+            string configModel = configuration["GOOGLE_GEMINI_MODEL"];
+            string envModel = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_MODEL");
+            _modelName = configModel ?? envModel ??
                          "gemini-1.5-flash";
             
-            var useFallbackStr = configuration["USE_FALLBACK_LLM"] ?? 
-                                Environment.GetEnvironmentVariable("USE_FALLBACK_LLM") ?? 
+            string configFallback = configuration["USE_FALLBACK_LLM"];
+            string envFallback = Environment.GetEnvironmentVariable("USE_FALLBACK_LLM");
+            var useFallbackStr = configFallback ?? envFallback ??
                                 "false";
             
             _useFallbackLLM = bool.TryParse(useFallbackStr, out var fallback) && fallback;
+            
+            _logger.LogInformation("--- LLM Service Configuration ---");
+            _logger.LogInformation("Config Key Present: {Present}", !string.IsNullOrEmpty(configApiKey));
+            _logger.LogInformation("Env Var Key Present: {Present}", !string.IsNullOrEmpty(envApiKey));
+            _logger.LogInformation("Final API Key Present: {Present}", !string.IsNullOrEmpty(_apiKey));
+            _logger.LogInformation("Config Model: {Model}", configModel ?? "<null>");
+            _logger.LogInformation("Env Var Model: {Model}", envModel ?? "<null>");
+            _logger.LogInformation("Final Model Used: {Model}", _modelName);
+            _logger.LogInformation("Config Fallback: {Fallback}", configFallback ?? "<null>");
+            _logger.LogInformation("Env Var Fallback: {Fallback}", envFallback ?? "<null>");
+            _logger.LogInformation("Final Use Fallback Setting: {UseFallback}", useFallbackStr);
+            _logger.LogInformation("Parsed Use Fallback: {UseFallback}", _useFallbackLLM);
+            _logger.LogInformation("---------------------------------");
             
             if (string.IsNullOrEmpty(_apiKey) && !_useFallbackLLM)
             {
@@ -43,7 +59,7 @@ namespace FootballCommentary.GAgents.Services
                 _useFallbackLLM = true;
             }
             
-            _logger.LogInformation("LLM Service initialized with model: {Model}, Fallback: {Fallback}, API Key present: {HasKey}", 
+            _logger.LogInformation("LLM Service initialized. Model: {Model}, Use Fallback: {Fallback}, API Key Present: {HasKey}", 
                 _modelName, _useFallbackLLM, !string.IsNullOrEmpty(_apiKey));
         }
         

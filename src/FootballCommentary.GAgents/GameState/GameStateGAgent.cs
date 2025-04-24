@@ -290,7 +290,8 @@ namespace FootballCommentary.GAgents.GameState
                 GameId = gameId,
                 EventType = GameEventType.Goal,
                 TeamId = teamId,
-                Position = new Position { X = teamId == "TeamA" ? 0.9 : 0.1, Y = 0.5 }
+                PlayerId = TryParsePlayerId(game.BallPossession),
+                Position = new Position { X = teamId == "TeamA" ? GOAL_POST_X_TEAM_B : GOAL_POST_X_TEAM_A, Y = 0.5 }
             });
             
             // Publish state update
@@ -340,8 +341,8 @@ namespace FootballCommentary.GAgents.GameState
                 
                 players.Add(new Player
                 {
-                    PlayerId = $"{teamId}_Player{i}",
-                    Name = $"Player {i}",
+                    PlayerId = $"{teamId}_{i + 1}",
+                    Name = $"Player {i + 1}",
                     Position = new Position { X = x, Y = y }
                 });
             }
@@ -710,6 +711,7 @@ namespace FootballCommentary.GAgents.GameState
                         GameId = game.GameId,
                         EventType = GameEventType.Pass,
                         TeamId = closestPlayer.PlayerId.StartsWith("TeamA") ? "TeamA" : "TeamB",
+                        PlayerId = TryParsePlayerId(closestPlayer.PlayerId),
                         Position = closestPlayer.Position
                     };
                 }
@@ -772,6 +774,7 @@ namespace FootballCommentary.GAgents.GameState
                         GameId = game.GameId,
                         EventType = GameEventType.Goal,
                         TeamId = isTeamA ? "TeamA" : "TeamB",
+                        PlayerId = TryParsePlayerId(playerWithBall.PlayerId),
                         Position = new Position { X = goalPostX, Y = 0.5 }
                     };
                     
@@ -786,6 +789,7 @@ namespace FootballCommentary.GAgents.GameState
                         GameId = game.GameId,
                         EventType = GameEventType.Shot,
                         TeamId = isTeamA ? "TeamA" : "TeamB",
+                        PlayerId = TryParsePlayerId(playerWithBall.PlayerId),
                         Position = playerWithBall.Position
                     };
                     
@@ -836,9 +840,27 @@ namespace FootballCommentary.GAgents.GameState
                     GameId = game.GameId,
                     EventType = GameEventType.Pass,
                     TeamId = isTeamA ? "TeamA" : "TeamB",
+                    PlayerId = TryParsePlayerId(playerWithBall.PlayerId),
                     Position = playerWithBall.Position
                 };
             }
+        }
+        
+        private int? TryParsePlayerId(string? playerIdString)
+        {
+            if (string.IsNullOrEmpty(playerIdString))
+            {
+                return null;
+            }
+
+            var parts = playerIdString.Split('_');
+            if (parts.Length == 2 && int.TryParse(parts[1], out int id))
+            {
+                return id;
+            }
+            
+            _logger.LogWarning("Could not parse PlayerId from string: {PlayerIdString}", playerIdString);
+            return null; // Return null if parsing fails
         }
     }
 } 

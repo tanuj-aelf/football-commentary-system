@@ -157,27 +157,37 @@ namespace FootballCommentary.GAgents.Commentary
                 FootballCommentary.Core.Models.GameState? gameState = null;
                 _state.State.GameStates.TryGetValue(gameEvent.GameId, out gameState);
                 
-                string promptTemplate = "Provide concise football commentary for this event: {0} {1}";
+                // Get player name if available
+                string playerName = PlayerData.GetPlayerName(gameEvent.TeamId, gameEvent.PlayerId);
+                string playerContext = (gameEvent.PlayerId != null && playerName != $"Player {gameEvent.PlayerId}" && playerName != "a player") 
+                                     ? $" by player {playerName} (ID: {gameEvent.PlayerId})" 
+                                     : "";
+
+                string promptTemplate = "Provide concise, exciting football commentary for this game event: {0}. Context: {1}{2}";
                 string eventDescription = gameEvent.EventType.ToString();
                 string additionalContext = string.Empty;
                 
                 if (gameState != null)
                 {
-                    additionalContext = $"Team A: {gameState.HomeTeam.Name} ({gameState.HomeTeam.Score}), " +
-                                      $"Team B: {gameState.AwayTeam.Name} ({gameState.AwayTeam.Score})";
-                                      
+                    additionalContext = $"Current score is {gameState.HomeTeam.Name} {gameState.HomeTeam.Score} - {gameState.AwayTeam.Score} {gameState.AwayTeam.Name}.";
+                                       
                     if (gameEvent.TeamId == "TeamA")
-                        additionalContext += $", Event by: {gameState.HomeTeam.Name}";
+                        additionalContext += $", Event involves team: {gameState.HomeTeam.Name}";
                     else if (gameEvent.TeamId == "TeamB")
-                        additionalContext += $", Event by: {gameState.AwayTeam.Name}";
+                        additionalContext += $", Event involves team: {gameState.AwayTeam.Name}";
                 }
                 
-                string prompt = string.Format(promptTemplate, eventDescription, additionalContext);
+                string prompt = string.Format(promptTemplate, eventDescription, additionalContext, playerContext);
+                _logger.LogInformation("LLM Prompt: {prompt}", prompt); // Log the prompt for debugging
+
                 string commentaryText = await _llmService.GenerateCommentaryAsync(prompt);
                 
                 // Fallback in case LLM fails
                 if (string.IsNullOrEmpty(commentaryText))
                 {
+                    _logger.LogWarning("LLM Service failed or returned empty ({Result}), using fallback commentary for event {EventType}", 
+                        commentaryText == null ? "null" : "empty string", 
+                        gameEvent.EventType);
                     commentaryText = GetFallbackCommentary(gameEvent, gameState);
                 }
                 
@@ -614,25 +624,27 @@ namespace FootballCommentary.GAgents.Commentary
         
         private string GetFallbackCommentary(GameEvent gameEvent, FootballCommentary.Core.Models.GameState? gameState)
         {
+            string playerName = PlayerData.GetPlayerName(gameEvent.TeamId, gameEvent.PlayerId);
+            string teamName = gameEvent.TeamId == "TeamA" && gameState != null 
+                                ? gameState.HomeTeam.Name 
+                                : (gameEvent.TeamId == "TeamB" && gameState != null ? gameState.AwayTeam.Name : gameEvent.TeamId ?? "the team");
+            
             switch (gameEvent.EventType)
             {
                 case GameEventType.Goal:
-                    string team = gameEvent.TeamId == "TeamA" && gameState != null 
-                        ? gameState.HomeTeam.Name 
-                        : (gameEvent.TeamId == "TeamB" && gameState != null ? gameState.AwayTeam.Name : gameEvent.TeamId);
-                    return $"GOAL! {team} scores!";
+                    return $"GOAL! {playerName} scores for {teamName}!";
                     
                 case GameEventType.Pass:
-                    return "Nice passing movement, keeping possession.";
+                    return $"Nice pass from {playerName}.";
                     
                 case GameEventType.Shot:
-                    return "Shot on goal! That was close.";
+                    return $"{playerName} takes a shot! That was close.";
                     
                 case GameEventType.Save:
                     return "Great save by the goalkeeper!";
                     
                 case GameEventType.Tackle:
-                    return "Good tackle, winning back possession.";
+                    return $"Good tackle by {playerName}, winning back possession.";
                     
                 case GameEventType.OutOfBounds:
                     return "The ball goes out of play.";

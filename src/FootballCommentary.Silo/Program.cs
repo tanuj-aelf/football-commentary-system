@@ -20,9 +20,6 @@ namespace FootballCommentary.Silo
     {
         public static async Task Main(string[] args)
         {
-            // Load environment variables from .env file
-            Env.Load();
-            
             // Configure Serilog
             Log.Logger = new LoggerConfiguration()
                 .MinimumLevel.Information()
@@ -38,13 +35,53 @@ namespace FootballCommentary.Silo
             {
                 Log.Information("Starting Football Commentary System Silo");
                 
+                // Ensure .env is loaded before Host is built
+                // Construct path relative to assembly location (usually more reliable)
+                var assemblyLocation = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+                // Go up 5 levels: bin/Debug/netX.X -> bin/Debug -> bin -> Silo -> src -> Project Root
+                var envPath = Path.Combine(assemblyLocation ?? ".", "..", "..", "..", "..", "..", ".env"); 
+                envPath = Path.GetFullPath(envPath);
+                
+                Log.Information("Attempting to load .env file from: {Path}", envPath);
+                bool fileExists = File.Exists(envPath);
+                Log.Information(".env file exists: {Exists}", fileExists);
+
+                // Declare the dictionary to hold env vars for configuration
+                Dictionary<string, string?> envVarsForConfig = new Dictionary<string, string?>();
+                
+                if (fileExists)
+                {
+                    Env.Load(envPath, new LoadOptions(true)); // Load .env from specific path, overwrite existing vars
+                    Log.Information("Loaded .env file (overwriting existing vars)");
+                    
+                    // Now try to read all environment vars into a dictionary
+                    var allEnvVars = Environment.GetEnvironmentVariables();
+                    envVarsForConfig = allEnvVars.Cast<System.Collections.DictionaryEntry>()
+                                                   .ToDictionary(e => (string)e.Key, e => (string?)e.Value);
+                    Log.Information("Captured {Count} environment variables for configuration", envVarsForConfig.Count);
+                }
+                else
+                {
+                     Log.Warning(".env file not found at expected location, API keys might be missing.");
+                }
+                
+                Log.Information("Test read from Env: GOOGLE_GEMINI_API_KEY present = {Present}", 
+                    !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GOOGLE_GEMINI_API_KEY")));
+                
                 // Create and configure the host
                 var host = Host.CreateDefaultBuilder(args)
                     .ConfigureAppConfiguration((hostContext, config) =>
                     {
+                        // Add .env variables directly to configuration
+                        if (envVarsForConfig.Any())
+                        {
+                            Log.Information("Adding .env variables to IConfiguration");
+                            config.AddInMemoryCollection(envVarsForConfig);
+                        }
+                        
                         config.AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
                         config.AddJsonFile($"appsettings.{hostContext.HostingEnvironment.EnvironmentName}.json", optional: true, reloadOnChange: true);
-                        config.AddEnvironmentVariables();
+                        config.AddEnvironmentVariables(); // Keep this for other standard env vars
                         config.AddCommandLine(args);
                     })
                     .UseSerilog()

@@ -97,9 +97,10 @@ namespace FootballCommentary.Core.Models
         [Id(0)] public string GameId { get; set; } = string.Empty;
         [Id(1)] public GameEventType EventType { get; set; }
         [Id(2)] public string TeamId { get; set; } = string.Empty;
-        [Id(3)] public Position Position { get; set; } = new Position();
-        [Id(4)] public Dictionary<string, string> AdditionalData { get; set; } = new Dictionary<string, string>();
-        [Id(5)] public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+        [Id(3)] public int? PlayerId { get; set; }
+        [Id(4)] public Position Position { get; set; } = new Position();
+        [Id(5)] public Dictionary<string, string> AdditionalData { get; set; } = new Dictionary<string, string>();
+        [Id(6)] public DateTime Timestamp { get; set; } = DateTime.UtcNow;
     }
 
     [Immutable]
