@@ -100,7 +100,7 @@
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    @foreach (var scorer in goalScorers.OrderByDescending(s => s.GoalCount))
+                                    @foreach (var scorer in goalScorers.OrderByDescending(s => s.GoalCount).ThenBy(s => s.PlayerName))
                                     {
                                         <tr>
                                             <td>@scorer.PlayerName</td>
@@ -114,6 +114,13 @@
                                         </tr>
                                     }
                                 </tbody>
+                                <tfoot>
+                                    <tr>
+                                        <td colspan="4" class="text-center">
+                                            <small class="text-muted">Total Goals: @goalScorers.Sum(s => s.GoalCount)</small>
+                                        </td>
+                                    </tr>
+                                </tfoot>
                             </table>
                         }
                         else
@@ -160,7 +167,26 @@
 
     protected override async Task OnInitializedAsync()
     {
+        LogAllPlayerNames(); // Log player names for debugging
         await ConfigureHubConnection();
+    }
+
+    private void LogAllPlayerNames()
+    {
+        // Log all player names for debugging purposes
+        Console.WriteLine("Available Team A (Home) player names:");
+        for (int i = 1; i <= 11; i++)
+        {
+            string name = FootballCommentary.Core.Models.PlayerData.GetPlayerName("TeamA", i);
+            Console.WriteLine($"  {i}: {name}");
+        }
+        
+        Console.WriteLine("Available Team B (Away) player names:");
+        for (int i = 1; i <= 11; i++)
+        {
+            string name = FootballCommentary.Core.Models.PlayerData.GetPlayerName("TeamB", i);
+            Console.WriteLine($"  {i}: {name}");
+        }
     }
 
     private void ConfigureHubHandlers()
@@ -204,37 +230,72 @@
                     if (state?.Status == GameStatus.GoalScored && gameState?.Status != GameStatus.GoalScored)
                     {
                         Console.WriteLine("[Blazor] Goal scored detected from GameStateUpdated");
-                        string scoringTeam = state.LastScoringTeamId ?? (state.HomeTeam.Score > (gameState?.HomeTeam?.Score ?? 0) ? "TeamA" : "TeamB");
                         
-                        // Create a fallback game event if the GameEventOccurred event wasn't received
-                        if (scoringTeam != null)
+                        // Default team is the one whose score increased
+                        string scoringTeam = state.LastScoringTeamId ?? 
+                            (state.HomeTeam.Score > (gameState?.HomeTeam?.Score ?? 0) ? "TeamA" : "TeamB");
+                        
+                        // Try to find the player who scored from recent commentary
+                        int? playerId = null;
+                        string playerName = "unknown player";
+                        
+                        // Get the latest commentary message
+                        var latestCommentary = commentaryMessages.FirstOrDefault();
+                        if (latestCommentary != null)
                         {
-                            int playerId = 9; // Default to player 9 as fallback
-                            if (scoringTeam == "TeamA" && state.HomeTeam.Players.Any())
+                            Console.WriteLine($"[Blazor] Looking for player name in commentary: {latestCommentary.Text}");
+                            
+                            // Examine all player names and find the first one mentioned in the commentary
+                            foreach (var homePlayerName in FootballCommentary.Core.Models.PlayerData.TeamAPlayerNames)
                             {
-                                // Try to get a reasonable player that might have scored
-                                playerId = int.TryParse(state.HomeTeam.Players.FirstOrDefault()?.PlayerId?.Split('_').LastOrDefault(), out var id) ? id : 9;
+                                if (latestCommentary.Text.Contains(homePlayerName, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    playerName = homePlayerName;
+                                    scoringTeam = "TeamA"; // Override team based on player name
+                                    playerId = FootballCommentary.Core.Models.PlayerData.GetPlayerIdByName("TeamA", playerName);
+                                    Console.WriteLine($"[Blazor] Found Team A player {playerName} with ID {playerId} in commentary");
+                                    break;
+                                }
                             }
-                            else if (scoringTeam == "TeamB" && state.AwayTeam.Players.Any())
+                            
+                            // If no Team A player found, check Team B
+                            if (playerId == null)
                             {
-                                playerId = int.TryParse(state.AwayTeam.Players.FirstOrDefault()?.PlayerId?.Split('_').LastOrDefault(), out var id) ? id : 9;
+                                foreach (var awayPlayerName in FootballCommentary.Core.Models.PlayerData.TeamBPlayerNames)
+                                {
+                                    if (latestCommentary.Text.Contains(awayPlayerName, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        playerName = awayPlayerName;
+                                        scoringTeam = "TeamB"; // Override team based on player name
+                                        playerId = FootballCommentary.Core.Models.PlayerData.GetPlayerIdByName("TeamB", playerName);
+                                        Console.WriteLine($"[Blazor] Found Team B player {playerName} with ID {playerId} in commentary");
+                                        break;
+                                    }
+                                }
                             }
-                            
-                            Console.WriteLine($"[Blazor] Creating fallback goal event for {scoringTeam} player {playerId}");
-                            
-                            // Create a fallback game event
-                            var goalEvent = new GameEvent
-                            {
-                                GameId = gameId,
-                                EventType = GameEventType.Goal,
-                                TeamId = scoringTeam,
-                                PlayerId = playerId,
-                                Position = new Position { X = 0.5, Y = 0.5 }
-                            };
-                            
-                            // Manually update goal scorer
-                            await UpdateGoalScorer(goalEvent);
                         }
+                        
+                        // If we couldn't identify the player from the commentary, use a fallback
+                        if (playerId == null)
+                        {
+                            // Default to a random player on the scoring team
+                            playerId = new Random().Next(1, 12);
+                            playerName = FootballCommentary.Core.Models.PlayerData.GetPlayerName(scoringTeam, playerId);
+                            Console.WriteLine($"[Blazor] Using fallback player {playerName} with ID {playerId}");
+                        }
+                        
+                        // Create a game event for the goal
+                        var goalEvent = new GameEvent
+                        {
+                            GameId = gameId,
+                            EventType = GameEventType.Goal,
+                            TeamId = scoringTeam,
+                            PlayerId = playerId,
+                            Position = new Position { X = 0.5, Y = 0.5 }
+                        };
+                        
+                        // Update the goal scorer
+                        await UpdateGoalScorer(goalEvent);
                     }
                     
                     // Debug player positions
@@ -389,12 +450,69 @@
             
             Console.WriteLine($"Game event received: {gameEvent.EventType} by {gameEvent.TeamId} player {gameEvent.PlayerId}");
             
-            if (gameEvent.EventType == GameEventType.Goal && gameEvent.PlayerId.HasValue)
+            if (gameEvent.EventType == GameEventType.Goal)
             {
                 Console.WriteLine($"Goal scored by {gameEvent.TeamId} player {gameEvent.PlayerId}");
                 Console.WriteLine($"Debug: current goalScorers count = {goalScorers.Count}");
                 
-                // Update goal scorers list
+                // Check if we have a recent commentary message that might mention the player
+                var latestCommentary = commentaryMessages.FirstOrDefault();
+                if (latestCommentary != null)
+                {
+                    Console.WriteLine($"Checking commentary for player name: {latestCommentary.Text}");
+                    
+                    // Look for player names in the commentary
+                    string? teamId = gameEvent.TeamId;
+                    int? override_playerId = null;
+                    
+                    // Check Team A players
+                    foreach (var playerName in FootballCommentary.Core.Models.PlayerData.TeamAPlayerNames)
+                    {
+                        if (latestCommentary.Text.Contains(playerName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            override_playerId = FootballCommentary.Core.Models.PlayerData.GetPlayerIdByName("TeamA", playerName);
+                            teamId = "TeamA";
+                            Console.WriteLine($"Found Team A player {playerName} (ID: {override_playerId}) in commentary");
+                            break;
+                        }
+                    }
+                    
+                    // Check Team B players if no Team A player was found
+                    if (override_playerId == null)
+                    {
+                        foreach (var playerName in FootballCommentary.Core.Models.PlayerData.TeamBPlayerNames)
+                        {
+                            if (latestCommentary.Text.Contains(playerName, StringComparison.OrdinalIgnoreCase))
+                            {
+                                override_playerId = FootballCommentary.Core.Models.PlayerData.GetPlayerIdByName("TeamB", playerName);
+                                teamId = "TeamB";
+                                Console.WriteLine($"Found Team B player {playerName} (ID: {override_playerId}) in commentary");
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // If we found a player in the commentary, create a modified game event
+                    if (override_playerId != null)
+                    {
+                        string playerName = FootballCommentary.Core.Models.PlayerData.GetPlayerName(teamId, override_playerId);
+                        Console.WriteLine($"Overriding player ID from {gameEvent.PlayerId} to {override_playerId} ({playerName})");
+                        
+                        // Create a modified game event with the correct player
+                        gameEvent = new GameEvent
+                        {
+                            GameId = gameEvent.GameId,
+                            EventType = gameEvent.EventType,
+                            TeamId = teamId,
+                            PlayerId = override_playerId,
+                            Position = gameEvent.Position,
+                            Timestamp = gameEvent.Timestamp,
+                            AdditionalData = gameEvent.AdditionalData
+                        };
+                    }
+                }
+                
+                // Update goal scorers list with potentially modified gameEvent
                 await UpdateGoalScorer(gameEvent);
                 
                 Console.WriteLine($"Debug: updated goalScorers count = {goalScorers.Count}");
@@ -752,8 +870,13 @@
         
         try
         {
-            // First determine which player to credit with the goal
-            int playerId = new Random().Next(1, 11); // Random player between 1 and 11
+            // Use a random player for more variety in the game
+            Random random = new Random();
+            int playerId = random.Next(1, 12); // Random player between 1 and 11
+            
+            Console.WriteLine($"Simulating goal for team {teamId} with player ID {playerId}");
+            string playerName = FootballCommentary.Core.Models.PlayerData.GetPlayerName(teamId, playerId);
+            Console.WriteLine($"Player name retrieved: {playerName}");
             
             await hubConnection.SendAsync("SimulateGoal", gameId, teamId, playerId);
             
@@ -824,6 +947,10 @@
                     
                     // Force UI update
                     StateHasChanged();
+                }
+                else
+                {
+                    Console.Error.WriteLine("Cannot update goal scorer: PlayerId is null");
                 }
             });
         }
@@ -953,18 +1080,39 @@
 
     private void AddTestGoalScorer()
     {
-        // Add a test goal scorer for debugging UI issues
-        var testScorer = new GoalScorer
-        {
-            PlayerId = "TestTeam_7",
-            PlayerName = "Test Player",
-            Team = "TeamA",
-            JerseyNumber = 7,
-            GoalCount = 1
-        };
+        // Get a random player for testing
+        Random random = new Random();
+        string teamId = random.Next(2) == 0 ? "TeamA" : "TeamB";
+        int playerId = random.Next(1, 12);
         
-        goalScorers.Add(testScorer);
-        Console.WriteLine($"Added test goal scorer. Current count: {goalScorers.Count}");
+        string playerName = FootballCommentary.Core.Models.PlayerData.GetPlayerName(teamId, playerId);
+        Console.WriteLine($"Adding test goal scorer: {playerName} (Team {teamId}, #{playerId})");
+        
+        // Check if this scorer already exists
+        var existingScorer = goalScorers.FirstOrDefault(s => 
+            s.PlayerId == $"{teamId}_{playerId}");
+        
+        if (existingScorer != null)
+        {
+            // Increment goal count
+            existingScorer.GoalCount++;
+            Console.WriteLine($"Incremented goal count for {existingScorer.PlayerName} to {existingScorer.GoalCount}");
+        }
+        else
+        {
+            // Add a new test goal scorer
+            var testScorer = new GoalScorer
+            {
+                PlayerId = $"{teamId}_{playerId}",
+                PlayerName = playerName,
+                Team = teamId,
+                JerseyNumber = playerId,
+                GoalCount = 1
+            };
+            
+            goalScorers.Add(testScorer);
+            Console.WriteLine($"Added test goal scorer {playerName}. Current count: {goalScorers.Count}");
+        }
         
         // Force UI update
         StateHasChanged();
