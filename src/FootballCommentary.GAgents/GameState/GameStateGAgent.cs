@@ -46,6 +46,17 @@ namespace FootballCommentary.GAgents.GameState
         private const double SHOOTING_DISTANCE = 0.2;
         private const double POSSESSION_CHANGE_PROBABILITY = 0.15;
         
+        // Field zones for more realistic positioning
+        private const double DEFENSE_ZONE = 0.3;
+        private const double MIDFIELD_ZONE = 0.6;
+        private const double ATTACK_ZONE = 0.7;
+        private const double TEAMMATE_AVOIDANCE_DISTANCE = 0.08;
+        private const double OPPONENT_AWARENESS_DISTANCE = 0.15;
+        private const double POSITION_RECOVERY_WEIGHT = 0.02;
+        private const double BALL_ATTRACTION_WEIGHT = 0.03;
+        private const double PLAYER_ROLE_ADHERENCE = 0.04;
+        private const double FORMATION_ADHERENCE = 0.03;
+        
         public GameStateGAgent(
             ILogger<GameStateGAgent> logger,
             [PersistentState("gameState", "Default")] IPersistentState<GameStateGAgentState> state)
@@ -464,46 +475,212 @@ namespace FootballCommentary.GAgents.GameState
         
         private void MoveAllPlayers(FootballCommentary.Core.Models.GameState game)
         {
-            // Move all players randomly with some bias toward the ball
-            var allPlayers = game.HomeTeam.Players.Concat(game.AwayTeam.Players).ToList();
-            
+            // Get all players from both teams
+            var homeTeamPlayers = game.HomeTeam.Players;
+            var awayTeamPlayers = game.AwayTeam.Players;
+            var allPlayers = homeTeamPlayers.Concat(awayTeamPlayers).ToList();
+
+            // Store the player with the ball
+            Player? playerWithBall = null;
+            if (!string.IsNullOrEmpty(game.BallPossession))
+            {
+                playerWithBall = allPlayers.FirstOrDefault(p => p.PlayerId == game.BallPossession);
+            }
+
+            // Move each player based on their team's tactical objectives
             foreach (var player in allPlayers)
             {
                 // Skip if this player has the ball
                 if (player.PlayerId == game.BallPossession)
                     continue;
                 
-                // Random movement with some attraction to the ball
-                double dx = (_random.NextDouble() - 0.5) * PLAYER_SPEED;
-                double dy = (_random.NextDouble() - 0.5) * PLAYER_SPEED;
+                bool isTeamA = player.PlayerId.StartsWith("TeamA");
+                bool isTeamInPossession = !string.IsNullOrEmpty(game.BallPossession) && 
+                    game.BallPossession.StartsWith(isTeamA ? "TeamA" : "TeamB");
                 
-                // Add some bias toward the ball (30% of the time)
-                if (_random.NextDouble() < 0.3)
+                // Get player number for role assignment, handling potential parsing errors
+                int playerNumber = 0; // Default to 0 if parsing fails
+                try
                 {
-                    double ballBiasX = (game.Ball.Position.X - player.Position.X) * 0.1;
-                    double ballBiasY = (game.Ball.Position.Y - player.Position.Y) * 0.1;
+                    string playerIndexStr = player.PlayerId.Split('_')[1].Replace("Player", "");
+                    playerNumber = int.Parse(playerIndexStr) + 1; // Add 1 to adjust for 1-based roles
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to parse player number from PlayerId: {PlayerId}", player.PlayerId);
+                    // Optionally handle the error, e.g., skip this player or assign a default role
+                    continue; // Skip moving this player if ID is invalid
+                }
+                
+                // Calculate player's base position based on role
+                Position basePosition = GetBasePositionForRole(playerNumber, isTeamA);
+                
+                // Apply different movement logic based on whether team is in possession
+                if (isTeamInPossession)
+                {
+                    MovePlayerWhenTeamHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                }
+                else
+                {
+                    MovePlayerWhenOpponentHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                }
+            }
+        }
+        
+        private Position GetBasePositionForRole(int playerNumber, bool isTeamA)
+        {
+            // Assign roles based on player numbers (1-11)
+            // 1: Goalkeeper
+            // 2-5: Defenders
+            // 6-8: Midfielders
+            // 9-11: Forwards
+            double x, y;
+            
+            if (playerNumber == 1) // Goalkeeper
+            {
+                x = isTeamA ? 0.1 : 0.9;
+                y = 0.5;
+            }
+            else if (playerNumber <= 5) // Defenders
+            {
+                x = isTeamA ? 0.2 : 0.8;
+                y = 0.2 + ((playerNumber - 1) * 0.15); // Spread across the defensive line
+            }
+            else if (playerNumber <= 8) // Midfielders
+            {
+                x = isTeamA ? 0.4 : 0.6;
+                y = 0.25 + ((playerNumber - 5) * 0.2); // Spread across midfield
+            }
+            else // Forwards
+            {
+                x = isTeamA ? 0.7 : 0.3;
+                y = 0.3 + ((playerNumber - 8) * 0.2); // Spread across forward line
+            }
+            
+            return new Position { X = x, Y = y };
+        }
+        
+        private void MovePlayerWhenTeamHasPossession(
+            FootballCommentary.Core.Models.GameState game, 
+            Player player, 
+            Player? playerWithBall, 
+            Position basePosition,
+            bool isTeamA)
+        {
+            // Players move more dynamically when their team has possession
+            
+            // 1. Calculate movement toward base position (formation adherence)
+            double dx = (basePosition.X - player.Position.X) * FORMATION_ADHERENCE;
+            double dy = (basePosition.Y - player.Position.Y) * FORMATION_ADHERENCE;
+            
+            // 2. Add forward movement bias for attacking team
+            double forwardBias = isTeamA ? PLAYER_SPEED * 0.4 : -PLAYER_SPEED * 0.4;
+            dx += forwardBias;
+            
+            // 3. Movement toward creating space for passing lanes
+            if (playerWithBall != null)
+            {
+                // Calculate vector from ball player to this player
+                double ballToPlayerX = player.Position.X - playerWithBall.Position.X;
+                double ballToPlayerY = player.Position.Y - playerWithBall.Position.Y;
+                
+                // Normalize the vector
+                double distance = Math.Sqrt(ballToPlayerX * ballToPlayerX + ballToPlayerY * ballToPlayerY);
+                
+                if (distance > 0 && distance < PASSING_DISTANCE)
+                {
+                    // Move to create better passing angles
+                    double moveX = ballToPlayerX / distance * PLAYER_SPEED * 0.5;
+                    double moveY = ballToPlayerY / distance * PLAYER_SPEED * 0.5;
+                    
+                    // Adjust to maintain forward progress
+                    moveX = isTeamA ? Math.Max(0, moveX) : Math.Min(0, moveX);
+                    
+                    dx += moveX;
+                    dy += moveY;
+                }
+            }
+            
+            // 4. Avoid clustering with teammates
+            AvoidTeammates(game, player, ref dx, ref dy, isTeamA);
+            
+            // 5. Add small random movement for naturalism
+            dx += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.3;
+            dy += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.3;
+            
+            // Apply movement with boundary checking
+            player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+            player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
+        }
+        
+        private void MovePlayerWhenOpponentHasPossession(
+            FootballCommentary.Core.Models.GameState game, 
+            Player player, 
+            Player? playerWithBall, 
+            Position basePosition,
+            bool isTeamA)
+        {
+            // Defensive movement when the opponent has possession
+            
+            // 1. Move toward defensive position
+            double defX = isTeamA ? 0.3 : 0.7; // Defensive line position
+            double dx = (defX - player.Position.X) * POSITION_RECOVERY_WEIGHT;
+            double dy = (basePosition.Y - player.Position.Y) * POSITION_RECOVERY_WEIGHT;
+            
+            // 2. Add attraction to the ball when it's close
+            if (playerWithBall != null)
+            {
+                double distToBall = Math.Sqrt(
+                    Math.Pow(player.Position.X - game.Ball.Position.X, 2) +
+                    Math.Pow(player.Position.Y - game.Ball.Position.Y, 2));
+                
+                if (distToBall < OPPONENT_AWARENESS_DISTANCE)
+                {
+                    double ballBiasX = (game.Ball.Position.X - player.Position.X) * BALL_ATTRACTION_WEIGHT;
+                    double ballBiasY = (game.Ball.Position.Y - player.Position.Y) * BALL_ATTRACTION_WEIGHT;
+                    
                     dx += ballBiasX;
                     dy += ballBiasY;
                 }
+            }
+            
+            // 3. Add small random movement for naturalism
+            dx += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.2;
+            dy += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.2;
+            
+            // Apply movement with boundary checking
+            player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+            player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
+        }
+        
+        private void AvoidTeammates(
+            FootballCommentary.Core.Models.GameState game, 
+            Player player, 
+            ref double dx, 
+            ref double dy, 
+            bool isTeamA)
+        {
+            // Get list of teammates
+            var teammates = isTeamA ? 
+                game.HomeTeam.Players.Where(p => p.PlayerId != player.PlayerId) : 
+                game.AwayTeam.Players.Where(p => p.PlayerId != player.PlayerId);
+            
+            foreach (var teammate in teammates)
+            {
+                double distance = Math.Sqrt(
+                    Math.Pow(player.Position.X - teammate.Position.X, 2) +
+                    Math.Pow(player.Position.Y - teammate.Position.Y, 2));
                 
-                // Team A players should generally stay on left half, Team B on right half
-                bool isTeamA = player.PlayerId.StartsWith("TeamA");
-                double fieldBias = 0;
-                
-                if (isTeamA && player.Position.X > 0.5)
+                // Apply repulsion when too close to teammates
+                if (distance < TEAMMATE_AVOIDANCE_DISTANCE && distance > 0)
                 {
-                    fieldBias = -0.01; // Bias toward left side
+                    double repulsionStrength = (TEAMMATE_AVOIDANCE_DISTANCE - distance) / TEAMMATE_AVOIDANCE_DISTANCE;
+                    double repulsionX = (player.Position.X - teammate.Position.X) / distance * repulsionStrength * PLAYER_SPEED;
+                    double repulsionY = (player.Position.Y - teammate.Position.Y) / distance * repulsionStrength * PLAYER_SPEED;
+                    
+                    dx += repulsionX;
+                    dy += repulsionY;
                 }
-                else if (!isTeamA && player.Position.X < 0.5)
-                {
-                    fieldBias = 0.01;  // Bias toward right side
-                }
-                
-                dx += fieldBias;
-                
-                // Update position with clamping to field boundaries
-                player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
-                player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
             }
         }
         
