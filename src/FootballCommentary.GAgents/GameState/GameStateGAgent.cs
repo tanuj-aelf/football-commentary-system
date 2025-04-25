@@ -9,6 +9,8 @@ using Orleans;
 using Orleans.Runtime;
 using Orleans.Streams;
 using Orleans.Timers;
+using System.Text;
+using System.Text.RegularExpressions;
 
 namespace FootballCommentary.GAgents.GameState
 {
@@ -32,6 +34,8 @@ namespace FootballCommentary.GAgents.GameState
         private readonly ILogger<GameStateGAgent> _logger;
         private readonly IPersistentState<GameStateGAgentState> _state;
         private readonly Random _random = new Random();
+        private readonly ILLMService _llmService;
+        private readonly LLMTactician _llmTactician;
         private IStreamProvider? _streamProvider;
         private Dictionary<string, IDisposable> _gameSimulationTimers = new Dictionary<string, IDisposable>();
         
@@ -60,10 +64,15 @@ namespace FootballCommentary.GAgents.GameState
         
         public GameStateGAgent(
             ILogger<GameStateGAgent> logger,
-            [PersistentState("gameState", "Default")] IPersistentState<GameStateGAgentState> state)
+            [PersistentState("gameState", "Default")] IPersistentState<GameStateGAgentState> state,
+            ILLMService llmService)
         {
             _logger = logger;
             _state = state;
+            _llmService = llmService;
+            _llmTactician = new LLMTactician(
+                logger.CreateLoggerForCategory<LLMTactician>(), 
+                llmService);
         }
         
         public override async Task OnActivateAsync(CancellationToken cancellationToken)
@@ -509,8 +518,8 @@ namespace FootballCommentary.GAgents.GameState
                 bool publishEvent = false;
                 GameEvent? gameEvent = null;
                 
-                // Move players
-                MoveAllPlayers(game);
+                // Move players - Now async
+                await MoveAllPlayers(game);
                 
                 // Update ball based on possession
                 UpdateBallPosition(game, out publishEvent, out gameEvent);
@@ -518,14 +527,6 @@ namespace FootballCommentary.GAgents.GameState
                 // Save game state
                 game.LastUpdateTime = DateTime.UtcNow;
                 await _state.WriteStateAsync();
-                
-                // Publish state update every 5 steps (500ms) - REMOVED from here
-                /* 
-                if (game.SimulationStep % 5 == 0)
-                {
-                    await PublishGameStateUpdateAsync(game);
-                }
-                */
                 
                 // Publish game event if needed
                 if (publishEvent && gameEvent != null)
@@ -548,7 +549,7 @@ namespace FootballCommentary.GAgents.GameState
             }
         }
         
-        private void MoveAllPlayers(FootballCommentary.Core.Models.GameState game)
+        private async Task MoveAllPlayers(FootballCommentary.Core.Models.GameState game)
         {
             // Get all players from both teams
             var homeTeamPlayers = game.HomeTeam.Players;
@@ -560,6 +561,43 @@ namespace FootballCommentary.GAgents.GameState
             if (!string.IsNullOrEmpty(game.BallPossession))
             {
                 playerWithBall = allPlayers.FirstOrDefault(p => p.PlayerId == game.BallPossession);
+            }
+
+            // Use LLM for movement suggestions only every 10 steps to limit API calls
+            bool useLLMSuggestions = game.SimulationStep % 10 == 0;
+            
+            // LLM movement suggestions for both teams
+            Dictionary<string, (double dx, double dy)> teamAMovementSuggestions = new Dictionary<string, (double dx, double dy)>();
+            Dictionary<string, (double dx, double dy)> teamBMovementSuggestions = new Dictionary<string, (double dx, double dy)>();
+            
+            // Get LLM movement suggestions if it's the right step
+            if (useLLMSuggestions)
+            {
+                // Check if team A has possession
+                bool isTeamAInPossession = !string.IsNullOrEmpty(game.BallPossession) && game.BallPossession.StartsWith("TeamA");
+                bool isTeamBInPossession = !string.IsNullOrEmpty(game.BallPossession) && game.BallPossession.StartsWith("TeamB");
+                
+                // Get movement suggestions for both teams
+                try
+                {
+                    teamAMovementSuggestions = await _llmTactician.GetMovementSuggestionsAsync(
+                        game, 
+                        homeTeamPlayers,
+                        true,
+                        isTeamAInPossession);
+                        
+                    teamBMovementSuggestions = await _llmTactician.GetMovementSuggestionsAsync(
+                        game, 
+                        awayTeamPlayers,
+                        false,
+                        isTeamBInPossession);
+                        
+                    _logger.LogInformation("LLM movement suggestions received for both teams. Step: {Step}", game.SimulationStep);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error getting LLM movement suggestions: {Message}", ex.Message);
+                }
             }
 
             // Move each player based on their team's tactical objectives
@@ -590,14 +628,44 @@ namespace FootballCommentary.GAgents.GameState
                 // Calculate player's base position based on role
                 Position basePosition = GetBasePositionForRole(playerNumber, isTeamA);
                 
-                // Apply different movement logic based on whether team is in possession
-                if (isTeamInPossession)
+                // Check if we have LLM suggestions for this player
+                var movementSuggestions = isTeamA ? teamAMovementSuggestions : teamBMovementSuggestions;
+                if (useLLMSuggestions && movementSuggestions.TryGetValue(player.PlayerId, out var suggestion))
                 {
-                    MovePlayerWhenTeamHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                    // Apply LLM-suggested movement with some adjustments for game logic
+                    double dx = suggestion.dx;
+                    double dy = suggestion.dy;
+                    
+                    // Add some adherence to base position to prevent players from wandering too far
+                    dx += (basePosition.X - player.Position.X) * POSITION_RECOVERY_WEIGHT * 0.5;
+                    dy += (basePosition.Y - player.Position.Y) * POSITION_RECOVERY_WEIGHT * 0.5;
+                    
+                    // Add small random movement for naturalism
+                    dx += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.1;
+                    dy += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.1;
+                    
+                    // Avoid teammates crowding
+                    AvoidTeammates(game, player, ref dx, ref dy, isTeamA);
+                    
+                    // Apply movement with boundary checking
+                    player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+                    player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
+                    
+                    _logger.LogDebug("Applied LLM movement for player {PlayerId}: dx={dx}, dy={dy}", 
+                        player.PlayerId, dx, dy);
                 }
                 else
                 {
-                    MovePlayerWhenOpponentHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                    // Fall back to rule-based movement logic
+                    // Apply different movement logic based on whether team is in possession
+                    if (isTeamInPossession)
+                    {
+                        MovePlayerWhenTeamHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                    }
+                    else
+                    {
+                        MovePlayerWhenOpponentHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                    }
                 }
             }
         }
@@ -1027,6 +1095,17 @@ namespace FootballCommentary.GAgents.GameState
             
             _logger.LogWarning("Could not parse PlayerId from string: {PlayerIdString}", playerIdString);
             return null; // Return null if parsing fails
+        }
+        
+        public async Task<string> GetTacticalAnalysisAsync(string gameId)
+        {
+            if (!_state.State.Games.TryGetValue(gameId, out var game))
+            {
+                throw new KeyNotFoundException($"Game {gameId} not found");
+            }
+            
+            // Get tactical analysis from LLM
+            return await _llmTactician.GetTacticalAnalysisAsync(game);
         }
     }
 } 
