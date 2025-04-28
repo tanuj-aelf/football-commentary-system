@@ -9,9 +9,30 @@ using Orleans;
 using Orleans.Runtime;
 using Orleans.Streams;
 using Orleans.Timers;
+using System.Text;
+using System.Text.RegularExpressions;
 
 namespace FootballCommentary.GAgents.GameState
 {
+    public enum TeamFormation
+    {
+        Formation_4_4_2,        // Classic 4-4-2
+        Formation_4_3_3,        // Attacking 4-3-3
+        Formation_4_2_3_1,      // Modern 4-2-3-1
+        Formation_3_5_2,        // Wing-back 3-5-2
+        Formation_5_3_2,        // Defensive 5-3-2
+        Formation_4_1_4_1       // Balanced 4-1-4-1
+    }
+    
+    [GenerateSerializer]
+    public class TeamFormationData
+    {
+        [Id(0)] public TeamFormation Formation { get; set; } = TeamFormation.Formation_4_4_2;
+        [Id(1)] public DateTime LastUpdateTime { get; set; } = DateTime.UtcNow;
+        [Id(2)] public Dictionary<string, Position> BasePositions { get; set; } = new();
+        [Id(3)] public Dictionary<string, (double dx, double dy)> CachedMovements { get; set; } = new();
+    }
+
     [GenerateSerializer]
     public class GameStateLogEvent
     {
@@ -25,6 +46,9 @@ namespace FootballCommentary.GAgents.GameState
         [Id(0)] public Dictionary<string, FootballCommentary.Core.Models.GameState> Games { get; set; } = new();
         [Id(1)] public List<GameStateLogEvent> LogEvents { get; set; } = new();
         [Id(2)] public Dictionary<string, int> GoalCelebrationTicks { get; set; } = new(); // Ticks remaining for goal celebration
+        [Id(3)] public Dictionary<string, TeamFormationData> TeamAFormations { get; set; } = new(); // Formations for Team A by gameId
+        [Id(4)] public Dictionary<string, TeamFormationData> TeamBFormations { get; set; } = new(); // Formations for Team B by gameId
+        [Id(5)] public Dictionary<string, DateTime> LastLLMUpdateTimes { get; set; } = new(); // Last time LLM was called for movement
     }
 
     public class GameStateGAgent : Grain, IGameStateAgent
@@ -32,6 +56,8 @@ namespace FootballCommentary.GAgents.GameState
         private readonly ILogger<GameStateGAgent> _logger;
         private readonly IPersistentState<GameStateGAgentState> _state;
         private readonly Random _random = new Random();
+        private readonly ILLMService _llmService;
+        private readonly LLMTactician _llmTactician;
         private IStreamProvider? _streamProvider;
         private Dictionary<string, IDisposable> _gameSimulationTimers = new Dictionary<string, IDisposable>();
         
@@ -60,10 +86,15 @@ namespace FootballCommentary.GAgents.GameState
         
         public GameStateGAgent(
             ILogger<GameStateGAgent> logger,
-            [PersistentState("gameState", "Default")] IPersistentState<GameStateGAgentState> state)
+            [PersistentState("gameState", "Default")] IPersistentState<GameStateGAgentState> state,
+            ILLMService llmService)
         {
             _logger = logger;
             _state = state;
+            _llmService = llmService;
+            _llmTactician = new LLMTactician(
+                logger.CreateLoggerForCategory<LLMTactician>(), 
+                llmService);
         }
         
         public override async Task OnActivateAsync(CancellationToken cancellationToken)
@@ -128,6 +159,10 @@ namespace FootballCommentary.GAgents.GameState
             var randomPlayerIndex = _random.Next(gameState.HomeTeam.Players.Count);
             gameState.BallPossession = gameState.HomeTeam.Players[randomPlayerIndex].PlayerId;
             
+            // Initialize formations for both teams (default 4-4-2 initially, will be updated by AI)
+            await InitializeTeamFormation(gameId, gameState, true);  // Team A
+            await InitializeTeamFormation(gameId, gameState, false); // Team B
+            
             _state.State.Games[gameId] = gameState;
             await _state.WriteStateAsync();
             
@@ -144,6 +179,347 @@ namespace FootballCommentary.GAgents.GameState
             });
             
             return gameState;
+        }
+        
+        private async Task InitializeTeamFormation(string gameId, FootballCommentary.Core.Models.GameState gameState, bool isTeamA)
+        {
+            try
+            {
+                // Get initial formation suggestion from LLM
+                var formation = await _llmTactician.GetFormationSuggestionAsync(gameState, isTeamA);
+                
+                // Create formation data
+                var formationData = new TeamFormationData
+                {
+                    Formation = formation,
+                    LastUpdateTime = DateTime.UtcNow,
+                    BasePositions = new Dictionary<string, Position>(),
+                    CachedMovements = new Dictionary<string, (double dx, double dy)>()
+                };
+                
+                // Calculate base positions for all players based on formation
+                var players = isTeamA ? gameState.HomeTeam.Players : gameState.AwayTeam.Players;
+                foreach (var player in players)
+                {
+                    // Get player number
+                    if (int.TryParse(player.PlayerId.Split('_')[1], out int playerIndex))
+                    {
+                        int playerNumber = playerIndex + 1; // Convert to 1-based player number
+                        formationData.BasePositions[player.PlayerId] = CalculatePositionForFormation(playerNumber, isTeamA, formation);
+                    }
+                }
+                
+                // Store formation data
+                if (isTeamA)
+                {
+                    _state.State.TeamAFormations[gameId] = formationData;
+                }
+                else
+                {
+                    _state.State.TeamBFormations[gameId] = formationData;
+                }
+                
+                _logger.LogInformation("Initialized {TeamId} with formation {Formation} for game {GameId}", 
+                    isTeamA ? "Team A" : "Team B", formation, gameId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error initializing team formation for {TeamId} in game {GameId}", 
+                    isTeamA ? "Team A" : "Team B", gameId);
+            }
+        }
+        
+        private Position CalculatePositionForFormation(int playerNumber, bool isTeamA, TeamFormation formation)
+        {
+            // Player 1 is always the goalkeeper
+            if (playerNumber == 1)
+            {
+                return new Position 
+                { 
+                    X = isTeamA ? 0.05 : 0.95, // Position goalkeepers closer to goal line
+                    Y = 0.5 
+                };
+            }
+            
+            // Formation-based positioning
+            double x, y;
+            
+            // Formation-based player position calculation
+            switch (formation)
+            {
+                case TeamFormation.Formation_4_4_2:
+                    (x, y) = Calculate_4_4_2_Position(playerNumber, isTeamA);
+                    break;
+                    
+                case TeamFormation.Formation_4_3_3:
+                    (x, y) = Calculate_4_3_3_Position(playerNumber, isTeamA);
+                    break;
+                    
+                case TeamFormation.Formation_4_2_3_1:
+                    (x, y) = Calculate_4_2_3_1_Position(playerNumber, isTeamA);
+                    break;
+                    
+                case TeamFormation.Formation_3_5_2:
+                    (x, y) = Calculate_3_5_2_Position(playerNumber, isTeamA);
+                    break;
+                    
+                case TeamFormation.Formation_5_3_2:
+                    (x, y) = Calculate_5_3_2_Position(playerNumber, isTeamA);
+                    break;
+                    
+                case TeamFormation.Formation_4_1_4_1:
+                    (x, y) = Calculate_4_1_4_1_Position(playerNumber, isTeamA);
+                    break;
+                    
+                default:
+                    // Fallback to 4-4-2
+                    (x, y) = Calculate_4_4_2_Position(playerNumber, isTeamA);
+                    break;
+            }
+            
+            return new Position { X = x, Y = y };
+        }
+        
+        private (double x, double y) Calculate_4_4_2_Position(int playerNumber, bool isTeamA)
+        {
+            double x, y;
+            
+            // Player positioning for 4-4-2 formation
+            if (playerNumber == 1) // Goalkeeper
+            {
+                x = isTeamA ? 0.05 : 0.95;
+                y = 0.5;
+            }
+            else if (playerNumber <= 5) // 4 Defenders
+            {
+                x = isTeamA ? 0.2 : 0.8;
+                // Space defenders evenly across the width
+                y = 0.2 + ((playerNumber - 2) * 0.2);
+            }
+            else if (playerNumber <= 9) // 4 Midfielders
+            {
+                x = isTeamA ? 0.4 : 0.6;
+                // Space midfielders evenly
+                y = 0.2 + ((playerNumber - 6) * 0.2);
+            }
+            else // 2 Forwards
+            {
+                x = isTeamA ? 0.7 : 0.3;
+                // Two forwards positioned left and right
+                y = (playerNumber == 10) ? 0.35 : 0.65;
+            }
+            
+            return (x, y);
+        }
+        
+        private (double x, double y) Calculate_4_3_3_Position(int playerNumber, bool isTeamA)
+        {
+            double x, y;
+            
+            if (playerNumber == 1) // Goalkeeper
+            {
+                x = isTeamA ? 0.05 : 0.95;
+                y = 0.5;
+            }
+            else if (playerNumber <= 5) // 4 Defenders
+            {
+                x = isTeamA ? 0.2 : 0.8;
+                y = 0.2 + ((playerNumber - 2) * 0.2);
+            }
+            else if (playerNumber <= 8) // 3 Midfielders
+            {
+                x = isTeamA ? 0.4 : 0.6;
+                // 3 midfielders, centered
+                y = 0.25 + ((playerNumber - 6) * 0.25);
+            }
+            else // 3 Forwards
+            {
+                x = isTeamA ? 0.75 : 0.25;
+                // 3 forwards spread across
+                y = 0.25 + ((playerNumber - 9) * 0.25);
+            }
+            
+            return (x, y);
+        }
+        
+        private (double x, double y) Calculate_4_2_3_1_Position(int playerNumber, bool isTeamA)
+        {
+            double x, y;
+            
+            if (playerNumber == 1) // Goalkeeper
+            {
+                x = isTeamA ? 0.05 : 0.95;
+                y = 0.5;
+            }
+            else if (playerNumber <= 5) // 4 Defenders
+            {
+                x = isTeamA ? 0.2 : 0.8;
+                y = 0.2 + ((playerNumber - 2) * 0.2);
+            }
+            else if (playerNumber <= 7) // 2 Defensive Midfielders
+            {
+                x = isTeamA ? 0.35 : 0.65;
+                y = (playerNumber == 6) ? 0.35 : 0.65;
+            }
+            else if (playerNumber <= 10) // 3 Attacking Midfielders
+            {
+                x = isTeamA ? 0.55 : 0.45;
+                y = 0.25 + ((playerNumber - 8) * 0.25);
+            }
+            else // 1 Striker
+            {
+                x = isTeamA ? 0.8 : 0.2;
+                y = 0.5;
+            }
+            
+            return (x, y);
+        }
+        
+        private (double x, double y) Calculate_3_5_2_Position(int playerNumber, bool isTeamA)
+        {
+            double x, y;
+            
+            if (playerNumber == 1) // Goalkeeper
+            {
+                x = isTeamA ? 0.05 : 0.95;
+                y = 0.5;
+            }
+            else if (playerNumber <= 4) // 3 Center Backs
+            {
+                x = isTeamA ? 0.15 : 0.85;
+                y = 0.25 + ((playerNumber - 2) * 0.25);
+            }
+            else if (playerNumber <= 9) // 5 Midfielders (including wing backs)
+            {
+                if (playerNumber == 5 || playerNumber == 9) // Wing backs
+                {
+                    x = isTeamA ? 0.3 : 0.7;
+                    y = (playerNumber == 5) ? 0.15 : 0.85;
+                }
+                else // Central midfielders
+                {
+                    x = isTeamA ? 0.45 : 0.55;
+                    y = 0.3 + ((playerNumber - 6) * 0.2);
+                }
+            }
+            else // 2 Forwards
+            {
+                x = isTeamA ? 0.75 : 0.25;
+                y = (playerNumber == 10) ? 0.4 : 0.6;
+            }
+            
+            return (x, y);
+        }
+        
+        private (double x, double y) Calculate_5_3_2_Position(int playerNumber, bool isTeamA)
+        {
+            double x, y;
+            
+            if (playerNumber == 1) // Goalkeeper
+            {
+                x = isTeamA ? 0.05 : 0.95;
+                y = 0.5;
+            }
+            else if (playerNumber <= 6) // 5 Defenders
+            {
+                if (playerNumber == 2 || playerNumber == 6) // Full backs
+                {
+                    x = isTeamA ? 0.2 : 0.8;
+                    y = (playerNumber == 2) ? 0.15 : 0.85;
+                }
+                else // Center backs
+                {
+                    x = isTeamA ? 0.15 : 0.85;
+                    y = 0.3 + ((playerNumber - 3) * 0.2);
+                }
+            }
+            else if (playerNumber <= 9) // 3 Midfielders
+            {
+                x = isTeamA ? 0.4 : 0.6;
+                y = 0.25 + ((playerNumber - 7) * 0.25);
+            }
+            else // 2 Forwards
+            {
+                x = isTeamA ? 0.7 : 0.3;
+                y = (playerNumber == 10) ? 0.4 : 0.6;
+            }
+            
+            return (x, y);
+        }
+        
+        private (double x, double y) Calculate_4_1_4_1_Position(int playerNumber, bool isTeamA)
+        {
+            double x, y;
+            
+            if (playerNumber == 1) // Goalkeeper
+            {
+                x = isTeamA ? 0.05 : 0.95;
+                y = 0.5;
+            }
+            else if (playerNumber <= 5) // 4 Defenders
+            {
+                x = isTeamA ? 0.2 : 0.8;
+                y = 0.2 + ((playerNumber - 2) * 0.2);
+            }
+            else if (playerNumber == 6) // 1 Defensive Midfielder
+            {
+                x = isTeamA ? 0.35 : 0.65;
+                y = 0.5;
+            }
+            else if (playerNumber <= 10) // 4 Midfielders
+            {
+                x = isTeamA ? 0.5 : 0.5;
+                y = 0.2 + ((playerNumber - 7) * 0.2);
+            }
+            else // 1 Striker
+            {
+                x = isTeamA ? 0.8 : 0.2;
+                y = 0.5;
+            }
+            
+            return (x, y);
+        }
+        
+        private Position GetBasePositionForRole(int playerNumber, bool isTeamA, string gameId)
+        {
+            // Try to get position from formation data first
+            string playerId = $"{(isTeamA ? "TeamA" : "TeamB")}_{playerNumber - 1}";
+            
+            // Check if we have formation data for this game and team
+            var formationData = isTeamA ? 
+                _state.State.TeamAFormations.GetValueOrDefault(gameId) : 
+                _state.State.TeamBFormations.GetValueOrDefault(gameId);
+                
+            if (formationData != null && formationData.BasePositions.TryGetValue(playerId, out var position))
+            {
+                return position;
+            }
+            
+            // Fallback to default positioning if no formation data available
+            double x, y;
+            
+            if (playerNumber == 1) // Goalkeeper
+            {
+                x = isTeamA ? 0.05 : 0.95; // Position goalkeepers closer to goal line
+                y = 0.5;
+            }
+            else if (playerNumber <= 5) // Defenders
+            {
+                x = isTeamA ? 0.2 : 0.8;
+                y = 0.2 + ((playerNumber - 1) * 0.15); // Spread across the defensive line
+            }
+            else if (playerNumber <= 8) // Midfielders
+            {
+                x = isTeamA ? 0.4 : 0.6;
+                y = 0.25 + ((playerNumber - 5) * 0.2); // Spread across midfield
+            }
+            else // Forwards
+            {
+                x = isTeamA ? 0.7 : 0.3;
+                y = 0.3 + ((playerNumber - 8) * 0.2); // Spread across forward line
+            }
+            
+            return new Position { X = x, Y = y };
         }
         
         public async Task<FootballCommentary.Core.Models.GameState> StartGameAsync(string gameId)
@@ -343,12 +719,32 @@ namespace FootballCommentary.GAgents.GameState
             
             for (int i = 0; i < count; i++)
             {
-                double x = teamId == "TeamA" ? 0.2 : 0.8;
-                double y = 0.1 + (0.8 * i / (count - 1));
+                double x, y;
+                
+                if (i == 0) // Goalkeeper (player index 0)
+                {
+                    x = teamId == "TeamA" ? GOAL_POST_X_TEAM_A + 0.02 : GOAL_POST_X_TEAM_B - 0.02;
+                    y = 0.5; // Center of goal
+                }
+                else if (i <= 4) // Defenders (player indices 1-4)
+                {
+                    x = teamId == "TeamA" ? 0.2 : 0.8;
+                    y = 0.2 + (0.6 * (i - 1) / 3); // Spread evenly across the width
+                }
+                else if (i <= 8) // Midfielders (player indices 5-8)
+                {
+                    x = teamId == "TeamA" ? 0.4 : 0.6;
+                    y = 0.2 + (0.6 * (i - 5) / 3); // Spread evenly across the width
+                }
+                else // Forwards (player indices 9-10)
+                {
+                    x = teamId == "TeamA" ? 0.65 : 0.35;
+                    y = 0.35 + (0.3 * (i - 9)); // Two forwards slightly spread
+                }
                 
                 players.Add(new Player
                 {
-                    PlayerId = $"{teamId}_{i + 1}",
+                    PlayerId = $"{teamId}_{i}",
                     Name = $"Player {i + 1}",
                     Position = new Position { X = x, Y = y }
                 });
@@ -509,8 +905,8 @@ namespace FootballCommentary.GAgents.GameState
                 bool publishEvent = false;
                 GameEvent? gameEvent = null;
                 
-                // Move players
-                MoveAllPlayers(game);
+                // Move players - Now async
+                await MoveAllPlayers(game);
                 
                 // Update ball based on possession
                 UpdateBallPosition(game, out publishEvent, out gameEvent);
@@ -518,14 +914,6 @@ namespace FootballCommentary.GAgents.GameState
                 // Save game state
                 game.LastUpdateTime = DateTime.UtcNow;
                 await _state.WriteStateAsync();
-                
-                // Publish state update every 5 steps (500ms) - REMOVED from here
-                /* 
-                if (game.SimulationStep % 5 == 0)
-                {
-                    await PublishGameStateUpdateAsync(game);
-                }
-                */
                 
                 // Publish game event if needed
                 if (publishEvent && gameEvent != null)
@@ -548,7 +936,7 @@ namespace FootballCommentary.GAgents.GameState
             }
         }
         
-        private void MoveAllPlayers(FootballCommentary.Core.Models.GameState game)
+        private async Task MoveAllPlayers(FootballCommentary.Core.Models.GameState game)
         {
             // Get all players from both teams
             var homeTeamPlayers = game.HomeTeam.Players;
@@ -562,9 +950,141 @@ namespace FootballCommentary.GAgents.GameState
                 playerWithBall = allPlayers.FirstOrDefault(p => p.PlayerId == game.BallPossession);
             }
 
+            // Check if it's time to update formations (every 30 seconds of game time)
+            if (game.SimulationStep % 300 == 0) // Every ~30 seconds
+            {
+                await UpdateTeamFormations(game);
+            }
+            
+            // Check if it's time to get new LLM suggestions (less frequent to reduce API calls)
+            // Only update LLM suggestions every ~50 steps (5 seconds) instead of 10 steps
+            bool useLLMSuggestions = game.SimulationStep % 50 == 0;
+            
+            // Check if it's been enough time since the last LLM call
+            if (useLLMSuggestions)
+            {
+                DateTime now = DateTime.UtcNow;
+                if (_state.State.LastLLMUpdateTimes.TryGetValue(game.GameId, out DateTime lastUpdate))
+                {
+                    // Only allow LLM calls if at least 1 second has passed
+                    if ((now - lastUpdate).TotalSeconds < 1)
+                    {
+                        _logger.LogDebug("Skipping LLM call as only {Seconds} seconds have passed since last call", 
+                            (now - lastUpdate).TotalSeconds);
+                        useLLMSuggestions = false;
+                    }
+                }
+                
+                if (useLLMSuggestions)
+                {
+                    _state.State.LastLLMUpdateTimes[game.GameId] = now;
+                }
+            }
+            
+            // LLM movement suggestions for both teams
+            Dictionary<string, (double dx, double dy)> teamAMovementSuggestions = new Dictionary<string, (double dx, double dy)>();
+            Dictionary<string, (double dx, double dy)> teamBMovementSuggestions = new Dictionary<string, (double dx, double dy)>();
+            
+            // Get LLM movement suggestions if it's the right step
+            if (useLLMSuggestions)
+            {
+                // Check if team A has possession
+                bool isTeamAInPossession = !string.IsNullOrEmpty(game.BallPossession) && game.BallPossession.StartsWith("TeamA");
+                bool isTeamBInPossession = !string.IsNullOrEmpty(game.BallPossession) && game.BallPossession.StartsWith("TeamB");
+                
+                // Get movement suggestions for both teams
+                try
+                {
+                    // Run these in parallel to speed up processing
+                    var teamATasks = _llmTactician.GetMovementSuggestionsAsync(
+                        game, 
+                        homeTeamPlayers,
+                        true,
+                        isTeamAInPossession);
+                        
+                    var teamBTasks = _llmTactician.GetMovementSuggestionsAsync(
+                        game, 
+                        awayTeamPlayers,
+                        false,
+                        isTeamBInPossession);
+                    
+                    // Wait for both to complete
+                    await Task.WhenAll(teamATasks, teamBTasks);
+                    
+                    // Get results
+                    teamAMovementSuggestions = await teamATasks;
+                    teamBMovementSuggestions = await teamBTasks;
+                        
+                    _logger.LogInformation("LLM movement suggestions received for both teams. Step: {Step}", game.SimulationStep);
+                    
+                    // Cache these movement suggestions in the formation data
+                    if (_state.State.TeamAFormations.TryGetValue(game.GameId, out var teamAFormation))
+                    {
+                        teamAFormation.CachedMovements = new Dictionary<string, (double dx, double dy)>(teamAMovementSuggestions);
+                        teamAFormation.LastUpdateTime = DateTime.UtcNow;
+                    }
+                    
+                    if (_state.State.TeamBFormations.TryGetValue(game.GameId, out var teamBFormation))
+                    {
+                        teamBFormation.CachedMovements = new Dictionary<string, (double dx, double dy)>(teamBMovementSuggestions);
+                        teamBFormation.LastUpdateTime = DateTime.UtcNow;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error getting LLM movement suggestions: {Message}", ex.Message);
+                }
+            }
+            else
+            {
+                // If not using LLM directly, try to use cached suggestions with variations
+                if (_state.State.TeamAFormations.TryGetValue(game.GameId, out var teamAFormation) && 
+                    teamAFormation.CachedMovements.Any())
+                {
+                    // Add variations to cached movements
+                    foreach (var (playerId, movement) in teamAFormation.CachedMovements)
+                    {
+                        double dx = movement.dx + (_random.NextDouble() - 0.5) * 0.01;
+                        double dy = movement.dy + (_random.NextDouble() - 0.5) * 0.01;
+                        
+                        // Clamp values
+                        dx = Math.Clamp(dx, -0.1, 0.1);
+                        dy = Math.Clamp(dy, -0.1, 0.1);
+                        
+                        teamAMovementSuggestions[playerId] = (dx, dy);
+                    }
+                }
+                
+                if (_state.State.TeamBFormations.TryGetValue(game.GameId, out var teamBFormation) && 
+                    teamBFormation.CachedMovements.Any())
+                {
+                    // Add variations to cached movements
+                    foreach (var (playerId, movement) in teamBFormation.CachedMovements)
+                    {
+                        double dx = movement.dx + (_random.NextDouble() - 0.5) * 0.01;
+                        double dy = movement.dy + (_random.NextDouble() - 0.5) * 0.01;
+                        
+                        // Clamp values
+                        dx = Math.Clamp(dx, -0.1, 0.1);
+                        dy = Math.Clamp(dy, -0.1, 0.1);
+                        
+                        teamBMovementSuggestions[playerId] = (dx, dy);
+                    }
+                }
+            }
+
             // Move each player based on their team's tactical objectives
             foreach (var player in allPlayers)
             {
+                // Special case for goalkeepers (player #1 on each team)
+                bool isGoalkeeper = player.PlayerId.EndsWith("_0"); // ID format: TeamX_0 for goalkeepers
+                
+                if (isGoalkeeper)
+                {
+                    MoveGoalkeeper(game, player, playerWithBall);
+                    continue;
+                }
+                
                 // Skip if this player has the ball
                 if (player.PlayerId == game.BallPossession)
                     continue;
@@ -588,51 +1108,200 @@ namespace FootballCommentary.GAgents.GameState
                 }
                 
                 // Calculate player's base position based on role
-                Position basePosition = GetBasePositionForRole(playerNumber, isTeamA);
+                Position basePosition = GetBasePositionForRole(playerNumber, isTeamA, game.GameId);
                 
-                // Apply different movement logic based on whether team is in possession
-                if (isTeamInPossession)
+                // Check if we have LLM suggestions for this player
+                var movementSuggestions = isTeamA ? teamAMovementSuggestions : teamBMovementSuggestions;
+                if (movementSuggestions.TryGetValue(player.PlayerId, out var suggestion))
                 {
-                    MovePlayerWhenTeamHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                    // Apply LLM-suggested movement with some adjustments for game logic
+                    double dx = suggestion.dx;
+                    double dy = suggestion.dy;
+                    
+                    // Add some adherence to base position to prevent players from wandering too far
+                    dx += (basePosition.X - player.Position.X) * POSITION_RECOVERY_WEIGHT * 0.5;
+                    dy += (basePosition.Y - player.Position.Y) * POSITION_RECOVERY_WEIGHT * 0.5;
+                    
+                    // Add small random movement for naturalism
+                    dx += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.1;
+                    dy += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.1;
+                    
+                    // Avoid teammates crowding
+                    AvoidTeammates(game, player, ref dx, ref dy, isTeamA);
+                    
+                    // Apply movement with boundary checking
+                    player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+                    player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
+                    
+                    _logger.LogDebug("Applied AI movement for player {PlayerId}: dx={dx}, dy={dy}", 
+                        player.PlayerId, dx, dy);
                 }
                 else
                 {
-                    MovePlayerWhenOpponentHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                    // Fall back to rule-based movement logic
+                    // Apply different movement logic based on whether team is in possession
+                    if (isTeamInPossession)
+                    {
+                        MovePlayerWhenTeamHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                    }
+                    else
+                    {
+                        MovePlayerWhenOpponentHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                    }
                 }
             }
         }
         
-        private Position GetBasePositionForRole(int playerNumber, bool isTeamA)
+        private void MoveGoalkeeper(FootballCommentary.Core.Models.GameState game, Player goalkeeper, Player? playerWithBall)
         {
-            // Assign roles based on player numbers (1-11)
-            // 1: Goalkeeper
-            // 2-5: Defenders
-            // 6-8: Midfielders
-            // 9-11: Forwards
-            double x, y;
+            // Determine which team the goalkeeper belongs to
+            bool isTeamA = goalkeeper.PlayerId.StartsWith("TeamA");
+            double goalPostX = isTeamA ? GOAL_POST_X_TEAM_A : GOAL_POST_X_TEAM_B;
             
-            if (playerNumber == 1) // Goalkeeper
+            // Maximum distance goalkeeper should stray from goal line
+            double maxDistance = 0.08;
+            
+            // Optimal position based on ball position
+            double optimalX;
+            double optimalY;
+            
+            // Ball position or default to center if no ball data
+            Position ballPos = game.Ball?.Position ?? new Position { X = 0.5, Y = 0.5 };
+            
+            // Goalkeeper stays close to goal line but can move forward slightly when ball is far away
+            if ((isTeamA && ballPos.X < 0.3) || (!isTeamA && ballPos.X > 0.7))
             {
-                x = isTeamA ? 0.1 : 0.9;
-                y = 0.5;
+                // Ball is in own half - goalkeeper can come forward a bit
+                optimalX = isTeamA ? Math.Min(goalPostX + 0.1, 0.15) : Math.Max(goalPostX - 0.1, 0.85);
             }
-            else if (playerNumber <= 5) // Defenders
+            else
             {
-                x = isTeamA ? 0.2 : 0.8;
-                y = 0.2 + ((playerNumber - 1) * 0.15); // Spread across the defensive line
-            }
-            else if (playerNumber <= 8) // Midfielders
-            {
-                x = isTeamA ? 0.4 : 0.6;
-                y = 0.25 + ((playerNumber - 5) * 0.2); // Spread across midfield
-            }
-            else // Forwards
-            {
-                x = isTeamA ? 0.7 : 0.3;
-                y = 0.3 + ((playerNumber - 8) * 0.2); // Spread across forward line
+                // Ball is away - stay closer to goal line
+                optimalX = goalPostX + (isTeamA ? 0.02 : -0.02);
             }
             
-            return new Position { X = x, Y = y };
+            // Goalkeeper tracks ball's Y position but within smaller range
+            double centerY = 0.5;
+            double trackingWeight = 0.6; // How much to follow the ball's Y position
+            optimalY = centerY + (ballPos.Y - centerY) * trackingWeight;
+            
+            // Clamp to prevent goalkeeper from leaving goal area completely
+            optimalY = Math.Clamp(optimalY, 0.3, 0.7);
+            
+            // Calculate movement speeds
+            double dx = (optimalX - goalkeeper.Position.X) * 0.1;
+            double dy = (optimalY - goalkeeper.Position.Y) * 0.1;
+            
+            // Add small random movement for more natural behavior
+            dx += (_random.NextDouble() - 0.5) * 0.005;
+            dy += (_random.NextDouble() - 0.5) * 0.005;
+            
+            // Apply movement with boundary checking
+            goalkeeper.Position.X = Math.Clamp(goalkeeper.Position.X + dx, 
+                isTeamA ? goalPostX : goalPostX - maxDistance, 
+                isTeamA ? goalPostX + maxDistance : goalPostX);
+            goalkeeper.Position.Y = Math.Clamp(goalkeeper.Position.Y + dy, 0.3, 0.7);
+            
+            // Goalkeeper diving logic - if ball is very close to goal and moving toward it
+            bool ballMovingTowardGoal = false;
+            
+            // Check if ball has velocity before accessing it
+            if (game.Ball != null) 
+            {
+                ballMovingTowardGoal = (isTeamA && game.Ball.VelocityX < 0) || (!isTeamA && game.Ball.VelocityX > 0);
+            }
+            
+            double distanceToBall = Math.Sqrt(
+                Math.Pow(goalkeeper.Position.X - ballPos.X, 2) + 
+                Math.Pow(goalkeeper.Position.Y - ballPos.Y, 2));
+            
+            if (ballMovingTowardGoal && distanceToBall < 0.1 && _random.NextDouble() < 0.4)
+            {
+                // Dive toward the ball
+                double diveDx = (ballPos.X - goalkeeper.Position.X) * 0.5;
+                double diveDy = (ballPos.Y - goalkeeper.Position.Y) * 0.5;
+                
+                goalkeeper.Position.X = Math.Clamp(goalkeeper.Position.X + diveDx, 
+                    isTeamA ? goalPostX - 0.03 : goalPostX - maxDistance, 
+                    isTeamA ? goalPostX + maxDistance : goalPostX + 0.03);
+                goalkeeper.Position.Y = Math.Clamp(goalkeeper.Position.Y + diveDy, 0.25, 0.75);
+                
+                // Check if goalkeeper intercepts the ball (closer than 0.03 units)
+                if (distanceToBall < 0.04 && game.Ball != null)
+                {
+                    // Goalkeeper saves the ball
+                    _logger.LogInformation("SAVE! Goalkeeper {PlayerId} makes a save!", goalkeeper.PlayerId);
+                    game.BallPossession = goalkeeper.PlayerId; // Goalkeeper gets the ball
+                    game.Ball.VelocityX = 0;
+                    game.Ball.VelocityY = 0;
+                }
+            }
+        }
+        
+        private async Task UpdateTeamFormations(FootballCommentary.Core.Models.GameState game)
+        {
+            try
+            {
+                _logger.LogInformation("Updating team formations for game {GameId}", game.GameId);
+                
+                // Update Team A formation
+                TeamFormation teamAFormation = await _llmTactician.GetFormationSuggestionAsync(game, true);
+                if (!_state.State.TeamAFormations.TryGetValue(game.GameId, out var teamAData))
+                {
+                    teamAData = new TeamFormationData();
+                    _state.State.TeamAFormations[game.GameId] = teamAData;
+                }
+                
+                bool teamAFormationChanged = teamAData.Formation != teamAFormation;
+                teamAData.Formation = teamAFormation;
+                teamAData.LastUpdateTime = DateTime.UtcNow;
+                
+                // Update Team B formation
+                TeamFormation teamBFormation = await _llmTactician.GetFormationSuggestionAsync(game, false);
+                if (!_state.State.TeamBFormations.TryGetValue(game.GameId, out var teamBData))
+                {
+                    teamBData = new TeamFormationData();
+                    _state.State.TeamBFormations[game.GameId] = teamBData;
+                }
+                
+                bool teamBFormationChanged = teamBData.Formation != teamBFormation;
+                teamBData.Formation = teamBFormation;
+                teamBData.LastUpdateTime = DateTime.UtcNow;
+                
+                // If formations changed, update base positions
+                if (teamAFormationChanged)
+                {
+                    _logger.LogInformation("Team A formation changed to {Formation}", teamAFormation);
+                    UpdateTeamBasePositions(game, true, teamAData);
+                }
+                
+                if (teamBFormationChanged)
+                {
+                    _logger.LogInformation("Team B formation changed to {Formation}", teamBFormation);
+                    UpdateTeamBasePositions(game, false, teamBData);
+                }
+                
+                await _state.WriteStateAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error updating team formations: {Message}", ex.Message);
+            }
+        }
+        
+        private void UpdateTeamBasePositions(FootballCommentary.Core.Models.GameState game, bool isTeamA, TeamFormationData formationData)
+        {
+            var players = isTeamA ? game.HomeTeam.Players : game.AwayTeam.Players;
+            formationData.BasePositions.Clear();
+            
+            foreach (var player in players)
+            {
+                if (int.TryParse(player.PlayerId.Split('_')[1], out int playerIndex))
+                {
+                    int playerNumber = playerIndex + 1; // Convert to 1-based player number
+                    formationData.BasePositions[player.PlayerId] = CalculatePositionForFormation(playerNumber, isTeamA, formationData.Formation);
+                }
+            }
         }
         
         private void MovePlayerWhenTeamHasPossession(
@@ -935,12 +1604,13 @@ namespace FootballCommentary.GAgents.GameState
 
                     // Publish goal event
                     publishEvent = true;
+                    int? scorerPlayerId = TryParsePlayerId(playerWithBall.PlayerId);
                     gameEvent = new GameEvent
                     {
                         GameId = game.GameId,
                         EventType = GameEventType.Goal,
                         TeamId = scoringTeamId,
-                        PlayerId = TryParsePlayerId(playerWithBall.PlayerId),
+                        PlayerId = scorerPlayerId.HasValue ? scorerPlayerId.Value + 1 : (int?)null, 
                         Position = new Position { X = goalPostX, Y = 0.5 }
                     };
                     
@@ -1028,5 +1698,16 @@ namespace FootballCommentary.GAgents.GameState
             _logger.LogWarning("Could not parse PlayerId from string: {PlayerIdString}", playerIdString);
             return null; // Return null if parsing fails
         }
+        
+        public async Task<string> GetTacticalAnalysisAsync(string gameId)
+        {
+            if (!_state.State.Games.TryGetValue(gameId, out var game))
+            {
+                throw new KeyNotFoundException($"Game {gameId} not found");
+            }
+            
+            // Get tactical analysis from LLM
+            return await _llmTactician.GetTacticalAnalysisAsync(game);
+        }
     }
-} 
+}
