@@ -18,6 +18,11 @@ namespace FootballCommentary.GAgents.GameState
         private readonly ILogger<LLMTactician> _logger;
         private readonly ILLMService _llmService;
         
+        // Movement suggestion cache to reduce LLM API calls
+        private Dictionary<string, Dictionary<string, (double dx, double dy)>> _cachedMovementSuggestions = new();
+        private Dictionary<string, DateTime> _movementCacheTimestamps = new();
+        private const int MOVEMENT_CACHE_SECONDS = 3; // How long to use cached movements
+        
         public LLMTactician(ILogger<LLMTactician> logger, ILLMService llmService)
         {
             _logger = logger;
@@ -32,6 +37,38 @@ namespace FootballCommentary.GAgents.GameState
         {
             try
             {
+                // Cache key based on team and game ID
+                string cacheKey = $"{gameState.GameId}_{(isTeamA ? "TeamA" : "TeamB")}";
+                
+                // Check if we have recent cached suggestions
+                if (_cachedMovementSuggestions.TryGetValue(cacheKey, out var cachedSuggestions) &&
+                    _movementCacheTimestamps.TryGetValue(cacheKey, out var timestamp))
+                {
+                    if ((DateTime.UtcNow - timestamp).TotalSeconds < MOVEMENT_CACHE_SECONDS)
+                    {
+                        _logger.LogDebug("Using cached movement suggestions for {TeamKey}", cacheKey);
+                        
+                        // Add small random variations to cached movements to make them more dynamic
+                        var suggestions = new Dictionary<string, (double dx, double dy)>();
+                        Random random = new Random();
+                        
+                        foreach (var (playerId, movement) in cachedSuggestions)
+                        {
+                            // Apply small random variation to keep movement natural
+                            double dx = movement.dx + (random.NextDouble() - 0.5) * 0.02;
+                            double dy = movement.dy + (random.NextDouble() - 0.5) * 0.02;
+                            
+                            // Clamp to reasonable range
+                            dx = Math.Clamp(dx, -0.1, 0.1);
+                            dy = Math.Clamp(dy, -0.1, 0.1);
+                            
+                            suggestions[playerId] = (dx, dy);
+                        }
+                        
+                        return suggestions;
+                    }
+                }
+                
                 // Create game state context for the LLM
                 var teamName = isTeamA ? gameState.HomeTeam.Name : gameState.AwayTeam.Name;
                 var opponentName = isTeamA ? gameState.AwayTeam.Name : gameState.HomeTeam.Name;
@@ -44,21 +81,20 @@ namespace FootballCommentary.GAgents.GameState
                     ((isTeamA && playerWithBallId.StartsWith("TeamA")) || 
                      (!isTeamA && playerWithBallId.StartsWith("TeamB")));
                 
-                // Build the prompt with current tactical situation
+                // Simplified prompt to reduce token count and speed up response
                 string promptTemplate = 
-                    "As an AI football tactician, suggest movement vectors (dx, dy) " +
-                    "for the following players in team {0} who are {1} possession. " +
-                    "Game time: {2} minutes, Score: {3}. " +
-                    "Ball is at position X:{4}, Y:{5}. " +
+                    "As a football tactical AI, suggest movement vectors (dx, dy) " +
+                    "for team {0} players ({1} possession). " +
+                    "Time: {2}m, Score: {3}, Ball at X:{4}, Y:{5}. " +
                     "{6}" +
-                    "Respond with a JSON object mapping player IDs to movement vectors (dx, dy values between -0.1 and 0.1) " +
-                    "in the format: {{\"PlayerID\": {{\"dx\": value, \"dy\": value}}, ...}}";
+                    "Respond with JSON only: {{\"PlayerID\": {{\"dx\": value, \"dy\": value}}, ...}} " +
+                    "with dx/dy values between -0.1 and 0.1.";
                 
-                // Add player information
+                // Add player information in a more compact format
                 var playerInfo = new StringBuilder();
                 foreach (var player in players)
                 {
-                    playerInfo.AppendLine($"Player {player.PlayerId} at position X:{player.Position.X:F2}, Y:{player.Position.Y:F2}");
+                    playerInfo.AppendLine($"{player.PlayerId}: ({player.Position.X:F2}, {player.Position.Y:F2})");
                 }
                 
                 string possession = hasPossession ? "in" : "out of";
@@ -97,7 +133,7 @@ namespace FootballCommentary.GAgents.GameState
                 _logger.LogDebug("Extracted JSON: {json}", jsonContent);
                 
                 // Parse the JSON
-                var suggestions = new Dictionary<string, (double dx, double dy)>();
+                var movementSuggestions = new Dictionary<string, (double dx, double dy)>();
                 
                 try
                 {
@@ -118,21 +154,87 @@ namespace FootballCommentary.GAgents.GameState
                             dx = Math.Clamp(dx, -0.1, 0.1);
                             dy = Math.Clamp(dy, -0.1, 0.1);
                             
-                            suggestions[playerId] = (dx, dy);
+                            movementSuggestions[playerId] = (dx, dy);
                         }
                     }
+                    
+                    // Cache the suggestions for future use
+                    _cachedMovementSuggestions[cacheKey] = new Dictionary<string, (double dx, double dy)>(movementSuggestions);
+                    _movementCacheTimestamps[cacheKey] = DateTime.UtcNow;
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Error parsing LLM movement JSON: {Message}", ex.Message);
                 }
                 
-                return suggestions;
+                return movementSuggestions;
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting LLM movement suggestions: {Message}", ex.Message);
                 return new Dictionary<string, (double dx, double dy)>();
+            }
+        }
+        
+        public async Task<TeamFormation> GetFormationSuggestionAsync(
+            FootballCommentary.Core.Models.GameState gameState,
+            bool isTeamA)
+        {
+            try
+            {
+                var teamName = isTeamA ? gameState.HomeTeam.Name : gameState.AwayTeam.Name;
+                var opponentName = isTeamA ? gameState.AwayTeam.Name : gameState.HomeTeam.Name;
+                var score = $"{gameState.HomeTeam.Score}-{gameState.AwayTeam.Score}";
+                var gameTimeMinutes = (int)gameState.GameTime.TotalMinutes;
+                
+                string promptTemplate = 
+                    "As a football manager, suggest ONE tactical formation for {0} against {1}. " +
+                    "Current score: {2}, Game time: {3} minutes. " +
+                    "Choose one of these formations: 4-4-2, 4-3-3, 4-2-3-1, 3-5-2, 5-3-2, 4-1-4-1. " +
+                    "Reply with ONLY the formation numbers (e.g., '4-3-3') and no other text.";
+                
+                string prompt = string.Format(
+                    promptTemplate,
+                    teamName,
+                    opponentName,
+                    score,
+                    gameTimeMinutes);
+                
+                _logger.LogDebug("LLM Formation Prompt: {prompt}", prompt);
+                
+                string response = await _llmService.GenerateCommentaryAsync(prompt);
+                
+                if (string.IsNullOrEmpty(response))
+                {
+                    _logger.LogWarning("LLM returned empty response for formation suggestion");
+                    return TeamFormation.Formation_4_4_2; // Default
+                }
+                
+                // Clean up response to extract just the formation
+                response = response.Trim();
+                
+                // Match known formation patterns
+                if (response.Contains("4-4-2"))
+                    return TeamFormation.Formation_4_4_2;
+                if (response.Contains("4-3-3"))
+                    return TeamFormation.Formation_4_3_3;
+                if (response.Contains("4-2-3-1"))
+                    return TeamFormation.Formation_4_2_3_1;
+                if (response.Contains("3-5-2"))
+                    return TeamFormation.Formation_3_5_2;
+                if (response.Contains("5-3-2"))
+                    return TeamFormation.Formation_5_3_2;
+                if (response.Contains("4-1-4-1"))
+                    return TeamFormation.Formation_4_1_4_1;
+                
+                // Default formation if no match
+                _logger.LogWarning("Could not parse formation from LLM response: {response}", response);
+                return TeamFormation.Formation_4_4_2;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting formation suggestion: {Message}", ex.Message);
+                return TeamFormation.Formation_4_4_2; // Default on error
             }
         }
         
