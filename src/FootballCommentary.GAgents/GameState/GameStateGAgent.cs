@@ -1604,12 +1604,13 @@ namespace FootballCommentary.GAgents.GameState
 
                     // Publish goal event
                     publishEvent = true;
+                    int? scorerPlayerId = TryParsePlayerId(playerWithBall.PlayerId);
                     gameEvent = new GameEvent
                     {
                         GameId = game.GameId,
                         EventType = GameEventType.Goal,
                         TeamId = scoringTeamId,
-                        PlayerId = TryParsePlayerId(playerWithBall.PlayerId),
+                        PlayerId = scorerPlayerId.HasValue ? scorerPlayerId.Value + 1 : (int?)null, 
                         Position = new Position { X = goalPostX, Y = 0.5 }
                     };
                     

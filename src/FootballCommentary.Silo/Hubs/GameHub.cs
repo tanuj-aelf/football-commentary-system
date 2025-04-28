@@ -143,6 +143,8 @@ namespace FootballCommentary.Silo.Hubs
         private static Dictionary<string, string> _gameToGrainMap = new();
         private static readonly object _subscriptionLock = new object();
         private static readonly Dictionary<string, StreamSubscriptionHandle<GameStateUpdate>> _gameStateSubscriptions = new();
+        // Add a dictionary to store GameEvent stream subscriptions
+        private static readonly Dictionary<string, StreamSubscriptionHandle<GameEvent>> _gameEventSubscriptions = new();
 
         public GameHub(IClusterClient clusterClient, ILogger<GameHub> logger, IHubContext<GameHub> hubContext)
         {
@@ -393,6 +395,29 @@ namespace FootballCommentary.Silo.Hubs
                 }
                 CommentaryPollingManager.StopPolling(gameId); // Stop commentary polling too
                  // -------------------------------------------
+                 
+                // --- Unsubscribe from GameEvent stream on EndGame --- 
+                StreamSubscriptionHandle<GameEvent>? gameEventSubscriptionHandle = null;
+                lock (_subscriptionLock)
+                {
+                    if (_gameEventSubscriptions.TryGetValue(gameId, out gameEventSubscriptionHandle))
+                    {
+                        _gameEventSubscriptions.Remove(gameId);
+                    }
+                }
+                if (gameEventSubscriptionHandle != null)
+                {
+                    try
+                    {
+                        await gameEventSubscriptionHandle.UnsubscribeAsync();
+                        _logger.LogInformation("Successfully unsubscribed from GameEvent stream on EndGame for {GameId}", gameId);
+                    }
+                    catch (Exception unsubEx)
+                    {
+                        _logger.LogWarning(unsubEx, "Error unsubscribing from GameEvent stream on EndGame for {GameId}", gameId);
+                    }
+                }
+                // -------------------------------------------------
             }
             catch (Exception ex)
             {
@@ -462,20 +487,6 @@ namespace FootballCommentary.Silo.Hubs
                     await Clients.Group(gameId).SendAsync("ReceiveCommentary", recentCommentary[0]);
                 }
                 
-                // Create and broadcast game event
-                var gameEvent = new GameEvent
-                {
-                    GameId = gameId,
-                    EventType = GameEventType.Goal,
-                    TeamId = teamId,
-                    PlayerId = playerId,
-                    Position = new Position { X = teamId == "TeamA" ? 1.0 : 0.0, Y = 0.5 },
-                    Timestamp = DateTime.UtcNow
-                };
-                
-                _logger.LogInformation("Broadcasting goal event to clients in group {GameId}", gameId);
-                await Clients.Group(gameId).SendAsync("GameEventOccurred", gameEvent);
-                
                 // Log the player name from PlayerData
                 string playerName = FootballCommentary.Core.Models.PlayerData.GetPlayerName(teamId, playerId);
                 _logger.LogInformation("Goal scored by {PlayerName} (ID: {PlayerId}) for team {TeamId}", 
@@ -492,14 +503,80 @@ namespace FootballCommentary.Silo.Hubs
         {
             try
             {
-                // Instead of real-time streaming, we'll rely on the grains to send updates
-                // via the SignalR hub directly when state changes or events occur
+                // Get the grainId for the game
+                if (!_gameToGrainMap.TryGetValue(gameId, out var grainId))
+                {
+                    _logger.LogError("Cannot subscribe to streams: No grain ID found for game {GameId}", gameId);
+                    return;
+                }
                 
-                // This approach simplifies the code and reduces coupling between Orleans streams and SignalR
+                _logger.LogInformation("Attempting to subscribe to streams for GameId: {GameId}, GrainId: {GrainId}", gameId, grainId);
+                
+                // Subscribe to GameEvent stream
+                lock (_subscriptionLock)
+                {
+                    if (_gameEventSubscriptions.ContainsKey(gameId))
+                    {
+                        _logger.LogInformation("Already subscribed to GameEvent stream for {GameId}", gameId);
+                        return; // Already subscribed
+                    }
+                    // Placeholder to prevent race conditions
+                    _gameEventSubscriptions[gameId] = null; 
+                }
+                
+                var streamProvider = _clusterClient.GetStreamProvider("GameEvents");
+                var gameEventStream = streamProvider.GetStream<GameEvent>(StreamId.Create("GameEvents", grainId));
+                
+                // Asynchronously subscribe
+                Task.Run(async () =>
+                {
+                    try 
+                    {
+                        var subscriptionHandle = await gameEventStream.SubscribeAsync(
+                            (gameEvent, token) => OnGameEventReceived(gameEvent));
+                        
+                        // Store the valid handle
+                        lock (_subscriptionLock)
+                        {
+                             _gameEventSubscriptions[gameId] = subscriptionHandle;
+                        }
+                        _logger.LogInformation("Successfully subscribed to GameEvent stream for {GameId}", gameId);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to subscribe to GameEvent stream for {GameId}", gameId);
+                        // Remove placeholder if subscription failed
+                        lock (_subscriptionLock)
+                        {
+                            _gameEventSubscriptions.Remove(gameId); 
+                        }
+                    }
+                });
+
+                // NOTE: We are not subscribing to GameState updates via stream here,
+                // as the hub methods (StartGame, KickBall, SimulateGoal, GetGameState)
+                // fetch the state and push it manually after actions.
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error subscribing to streams for game {GameId}: {Message}", gameId, ex.Message);
+            }
+        }
+
+        // Handler for receiving GameEvents from the Orleans stream
+        private async Task OnGameEventReceived(GameEvent gameEvent)
+        {
+            try
+            {
+                _logger.LogInformation("Received GameEvent from stream: Type={EventType}, GameId={GameId}", 
+                    gameEvent.EventType, gameEvent.GameId);
+                    
+                // Forward the event to the relevant SignalR group
+                await _hubContext.Clients.Group(gameEvent.GameId).SendAsync("ReceiveGameEvent", gameEvent);
+            }
+            catch (Exception ex)
+            {
+                 _logger.LogError(ex, "Error forwarding GameEvent to SignalR clients for GameId {GameId}", gameEvent.GameId);
             }
         }
 
