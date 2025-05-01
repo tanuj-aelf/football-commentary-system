@@ -4,7 +4,7 @@ let previousGameState = null;
 let interpolatedState = null; // Added for smooth interpolation
 let interpolationProgress = 0; // Progress between states (0 to 1)
 let lastUpdateTime = 0; // Timestamp of last state update
-let stateDuration = 400; // Duration between server updates in ms (increased from 250 for slower movement)
+let stateDuration = 600; // Duration between server updates in ms (increased from 400 for slower movement)
 let lastServerUpdateTime = 0; // Track when we last received a server update
 let serverUpdateThreshold = 2000; // If no update in 2 seconds, reset interpolation
 let lastStateSignature = ""; // To detect actual changes in state
@@ -22,7 +22,7 @@ let skipLogFrames = 120; // Only log every 120 frames to reduce console spam
 let lastBallPosition = null; // Track last ball position for anti-swarming logic
 let matchRestarting = false; // Flag to indicate match is restarting (kickoff)
 let kickoffAnimationStart = null; // Time when kickoff animation started
-let kickoffAnimationDuration = 3500; // Duration of kickoff animation in ms (increased to 3.5 seconds for slower, more realistic movement)
+let kickoffAnimationDuration = 5000; // Duration of kickoff animation in ms (increased to 5 seconds for more realistic movement)
 let blockStateUpdates = false; // Flag to block state updates during crucial animations
 let ignoreServerUpdatesUntil = 0; // Timestamp until which server updates should be ignored
 let playerMovementSpeeds = {}; // Store movement speeds for each player to make movement natural
@@ -96,12 +96,12 @@ function preventPlayerSwarm(state) {
     const isAwayTeamPossession = teamWithPossession === "TeamB";
     
     // Define the maximum number of players allowed within close range of the ball
-    // Attacking team (with possession) gets more players near ball than defending team
-    const maxAttackingPlayersNearBall = 3; // Team with possession
-    const maxDefendingPlayersNearBall = 2; // Team without possession
+    // Increase these values to allow more players near the ball but prevent complete swarming
+    const maxAttackingPlayersNearBall = 4; // Increased from 3 to allow more offensive options
+    const maxDefendingPlayersNearBall = 3; // Increased from 2 to allow more defense but not overwhelming
     
-    // Different thresholds for different areas
-    const veryCloseThreshold = 0.08; // Very close to ball - minimum distance
+    // Different thresholds for different areas - adjusted to provide more space
+    const veryCloseThreshold = 0.05; // Reduced from 0.06 - minimum distance players can get to ball carrier
     const closeRangeThreshold = 0.15; // Standard close range threshold
     const mediumRangeThreshold = 0.25; // Medium range for tracking players
     
@@ -118,6 +118,14 @@ function preventPlayerSwarm(state) {
                 const distance = Math.sqrt(dx * dx + dy * dy);
                 player._distanceToBall = distance;
                 
+                // Respect team half boundaries - home team should generally stay on left side
+                if (player.position.x > 0.55 && result.status !== 4) { // Not during goal celebration
+                    // Gently nudge player back to their side (unless they're attacking)
+                    if (!isHomeTeamPossession || distance > 0.2) {
+                        player.position.x = Math.max(player.position.x - 0.01, 0.45);
+                    }
+                }
+                
                 if (distance < closeRangeThreshold) {
                     homeTeamNearBall.push(player);
                 }
@@ -132,6 +140,14 @@ function preventPlayerSwarm(state) {
                 const dy = player.position.y - ballPos.y;
                 const distance = Math.sqrt(dx * dx + dy * dy);
                 player._distanceToBall = distance;
+                
+                // Respect team half boundaries - away team should generally stay on right side
+                if (player.position.x < 0.45 && result.status !== 4) { // Not during goal celebration
+                    // Gently nudge player back to their side (unless they're attacking)
+                    if (!isAwayTeamPossession || distance > 0.2) {
+                        player.position.x = Math.min(player.position.x + 0.01, 0.55);
+                    }
+                }
                 
                 if (distance < closeRangeThreshold) {
                     awayTeamNearBall.push(player);
@@ -160,10 +176,10 @@ function preventPlayerSwarm(state) {
                 const distSquared = dx*dx + dy*dy;
                 
                 if (distSquared < minDistance * minDistance) {
-                    // Too close, move them apart
+                    // Too close, move them apart - use gentler force
                     const dist = Math.sqrt(distSquared);
-                    const moveX = dx / dist * (minDistance - dist) / 2;
-                    const moveY = dy / dist * (minDistance - dist) / 2;
+                    const moveX = dx / dist * (minDistance - dist) * 0.25; // Reduced from 0.3
+                    const moveY = dy / dist * (minDistance - dist) * 0.25; // Reduced from 0.3
                     
                     // Move both players in opposite directions
                     p1.position.x -= moveX;
@@ -190,13 +206,82 @@ function preventPlayerSwarm(state) {
         enforceMinimumDistance(result.awayTeam.players);
     }
     
-    // Move excess home team players away from the ball
-    if (homeTeamNearBall.length > maxHomeTeamNearBall) {
-        // First check if any players are too close to the ball
-        for (let i = 0; i < homeTeamNearBall.length; i++) {
-            const player = homeTeamNearBall[i];
-            if (player._distanceToBall < veryCloseThreshold) {
-                // This player is too close to the ball, move them away immediately
+    // Only apply crowding prevention in normal play (not during kickoffs or goal celebrations)
+    // Check for status InProgress (1) and not recently after a goal or restart
+    if (result.status === 1 && !matchRestarting) {
+        // Give special protection to the player with the ball
+        const ballPossessorId = result.ballPossession;
+        if (ballPossessorId) {
+            // Find possessing player team
+            const isHomePossession = ballPossessorId.startsWith('TeamA');
+            const playerWithBall = isHomePossession 
+                ? result.homeTeam?.players?.find(p => p.playerId === ballPossessorId)
+                : result.awayTeam?.players?.find(p => p.playerId === ballPossessorId);
+                
+            if (playerWithBall) {
+                // Create a protective bubble around ball possessor
+                const opposingPlayers = isHomePossession ? awayTeamNearBall : homeTeamNearBall;
+                
+                // Keep track of how many defenders are already close
+                let closeDefenderCount = 0;
+                
+                // Process each opposing player
+                opposingPlayers.forEach(defender => {
+                    const dx = defender.position.x - playerWithBall.position.x;
+                    const dy = defender.position.y - playerWithBall.position.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    
+                    // If too close to ball carrier and we already have enough defenders
+                    if (distance < veryCloseThreshold && closeDefenderCount >= 1) {
+                        // Push defender away more strongly
+                        const pushFactor = 0.01; // Reduced from original repulsion values
+                        const pushX = dx === 0 ? (Math.random() - 0.5) * 0.01 : dx / Math.abs(dx) * pushFactor;
+                        const pushY = dy === 0 ? (Math.random() - 0.5) * 0.01 : dy / Math.abs(dy) * pushFactor;
+                        
+                        defender.position.x += pushX;
+                        defender.position.y += pushY;
+                    }
+                    
+                    // Count defenders that are close enough to challenge
+                    if (distance < veryCloseThreshold * 1.5) {
+                        closeDefenderCount++;
+                    }
+                });
+            }
+        }
+
+        // Regular swarming prevention logic - with reduced forces
+        // Move excess home team players away from the ball - with less force
+        if (homeTeamNearBall.length > maxHomeTeamNearBall) {
+            // First check if any players are too close to the ball
+            for (let i = 0; i < homeTeamNearBall.length; i++) {
+                const player = homeTeamNearBall[i];
+                if (player._distanceToBall < veryCloseThreshold) {
+                    // This player is too close to the ball, move them away gently
+                    const dirX = player.position.x - ballPos.x;
+                    const dirY = player.position.y - ballPos.y;
+                    const mag = Math.sqrt(dirX * dirX + dirY * dirY);
+                    
+                    if (mag > 0.001) {
+                        // Normalize and use as movement direction
+                        const normX = dirX / mag;
+                        const normY = dirY / mag;
+                        // Move player away from ball gently (reduced further)
+                        player.position.x += normX * 0.01; // Reduced from 0.015
+                        player.position.y += normY * 0.01; // Reduced from 0.015
+                        
+                        // Clamp to field boundaries
+                        player.position.x = Math.max(0.05, Math.min(0.95, player.position.x));
+                        player.position.y = Math.max(0.05, Math.min(0.95, player.position.y));
+                    }
+                }
+            }
+            
+            // Then handle excess players beyond the allowed maximum - with gentler forces
+            for (let i = maxHomeTeamNearBall; i < homeTeamNearBall.length; i++) {
+                const player = homeTeamNearBall[i];
+                
+                // Move away from ball while maintaining some natural movement
                 const dirX = player.position.x - ballPos.x;
                 const dirY = player.position.y - ballPos.y;
                 const mag = Math.sqrt(dirX * dirX + dirY * dirY);
@@ -205,9 +290,18 @@ function preventPlayerSwarm(state) {
                     // Normalize and use as movement direction
                     const normX = dirX / mag;
                     const normY = dirY / mag;
-                    // Move player away from ball more aggressively (but slowed down)
-                    player.position.x += normX * 0.03;  // Reduced from 0.05
-                    player.position.y += normY * 0.03;  // Reduced from 0.05
+                    
+                    // Move player away from ball with gentler force (further reduced)
+                    const forceFactor = 0.005 * (1 + (i - maxHomeTeamNearBall) * 0.05); // Reduced from 0.008
+                    player.position.x += normX * forceFactor;
+                    player.position.y += normY * forceFactor;
+                    
+                    // Reduced sideways movement
+                    if (isHomeTeamPossession) {
+                        // Add minimal tactical positioning
+                        const sidewaysFactor = 0.002 * Math.sin(player._distanceToBall * 10); // Reduced from 0.003
+                        player.position.y += sidewaysFactor;
+                    }
                     
                     // Clamp to field boundaries
                     player.position.x = Math.max(0.05, Math.min(0.95, player.position.x));
@@ -216,46 +310,37 @@ function preventPlayerSwarm(state) {
             }
         }
         
-        // Then handle excess players beyond the allowed maximum
-        for (let i = maxHomeTeamNearBall; i < homeTeamNearBall.length; i++) {
-            const player = homeTeamNearBall[i];
-            
-            // Move away from ball while maintaining some natural movement
-            const dirX = player.position.x - ballPos.x;
-            const dirY = player.position.y - ballPos.y;
-            const mag = Math.sqrt(dirX * dirX + dirY * dirY);
-            
-            if (mag > 0.001) {
-                // Normalize and use as movement direction
-                const normX = dirX / mag;
-                const normY = dirY / mag;
-                
-                // Move player away from ball - stronger force for those further down the list (but slowed down)
-                const forceFactor = 0.012 * (1 + (i - maxHomeTeamNearBall) * 0.2);  // Reduced from 0.02
-                player.position.x += normX * forceFactor;
-                player.position.y += normY * forceFactor;
-                
-                // Add a bit of sideways movement to create space for attacking (slight reduction)
-                if (isHomeTeamPossession) {
-                    // Add some tactical positioning - move to sides to create passing lanes
-                    const sidewaysFactor = 0.006 * Math.sin(player._distanceToBall * 10);  // Reduced from 0.01
-                    player.position.y += sidewaysFactor;
+        // Apply similar gentler handling for away team - with even more reduced forces for defense
+        if (awayTeamNearBall.length > maxAwayTeamNearBall) {
+            // First check if any players are too close to the ball
+            for (let i = 0; i < awayTeamNearBall.length; i++) {
+                const player = awayTeamNearBall[i];
+                if (player._distanceToBall < veryCloseThreshold) {
+                    // This player is too close to the ball, move them away gently
+                    const dirX = player.position.x - ballPos.x;
+                    const dirY = player.position.y - ballPos.y;
+                    const mag = Math.sqrt(dirX * dirX + dirY * dirY);
+                    
+                    if (mag > 0.001) {
+                        // Normalize and use as movement direction
+                        const normX = dirX / mag;
+                        const normY = dirY / mag;
+                        // Move player away from ball gently (reduced further)
+                        player.position.x += normX * 0.01; // Reduced from 0.018
+                        player.position.y += normY * 0.01; // Reduced from 0.018
+                        
+                        // Clamp to field boundaries
+                        player.position.x = Math.max(0.05, Math.min(0.95, player.position.x));
+                        player.position.y = Math.max(0.05, Math.min(0.95, player.position.y));
+                    }
                 }
-                
-                // Clamp to field boundaries
-                player.position.x = Math.max(0.05, Math.min(0.95, player.position.x));
-                player.position.y = Math.max(0.05, Math.min(0.95, player.position.y));
             }
-        }
-    }
-    
-    // More aggressive handling for away team (defending team) swarming
-    if (awayTeamNearBall.length > maxAwayTeamNearBall) {
-        // First check if any players are too close to the ball
-        for (let i = 0; i < awayTeamNearBall.length; i++) {
-            const player = awayTeamNearBall[i];
-            if (player._distanceToBall < veryCloseThreshold) {
-                // This player is too close to the ball, move them away immediately
+            
+            // Then handle excess players beyond the allowed maximum - gentler forces
+            for (let i = maxAwayTeamNearBall; i < awayTeamNearBall.length; i++) {
+                const player = awayTeamNearBall[i];
+                
+                // Move away from ball
                 const dirX = player.position.x - ballPos.x;
                 const dirY = player.position.y - ballPos.y;
                 const mag = Math.sqrt(dirX * dirX + dirY * dirY);
@@ -264,48 +349,24 @@ function preventPlayerSwarm(state) {
                     // Normalize and use as movement direction
                     const normX = dirX / mag;
                     const normY = dirY / mag;
-                    // Move player away from ball more aggressively (but slowed down)
-                    player.position.x += normX * 0.036; // Reduced from 0.06
-                    player.position.y += normY * 0.036; // Reduced from 0.06
+                    
+                    // Move player away from ball - with gentler force
+                    const forceFactor = 0.006 * (1 + (i - maxAwayTeamNearBall) * 0.07); // Reduced from 0.012
+                    player.position.x += normX * forceFactor;
+                    player.position.y += normY * forceFactor;
+                    
+                    // Reduced tactical positioning
+                    if (!isAwayTeamPossession) {
+                        // Minimal tactical defensive positioning
+                        const playerNumber = parseInt(player.playerId.split('_')[1], 10) || 0;
+                        const spreadFactor = 0.003 * Math.sin(playerNumber * Math.PI / 5); // Reduced from 0.006
+                        player.position.y += spreadFactor;
+                    }
                     
                     // Clamp to field boundaries
                     player.position.x = Math.max(0.05, Math.min(0.95, player.position.x));
                     player.position.y = Math.max(0.05, Math.min(0.95, player.position.y));
                 }
-            }
-        }
-        
-        // Then handle excess players beyond the allowed maximum - more aggressively for away team
-        for (let i = maxAwayTeamNearBall; i < awayTeamNearBall.length; i++) {
-            const player = awayTeamNearBall[i];
-            
-            // Move away from ball
-            const dirX = player.position.x - ballPos.x;
-            const dirY = player.position.y - ballPos.y;
-            const mag = Math.sqrt(dirX * dirX + dirY * dirY);
-            
-            if (mag > 0.001) {
-                // Normalize and use as movement direction
-                const normX = dirX / mag;
-                const normY = dirY / mag;
-                
-                // Move player away from ball - stronger force for those further down the list (but slowed down)
-                // Use higher values for away team (defending team) to prevent crowding
-                const forceFactor = 0.024 * (1 + (i - maxAwayTeamNearBall) * 0.3);  // Reduced from 0.04
-                player.position.x += normX * forceFactor;
-                player.position.y += normY * forceFactor;
-                
-                // If this is the defending team, add some defensive positioning (slight reduction)
-                if (!isAwayTeamPossession) {
-                    // Add tactical defensive formation - spread out to block passing lanes
-                    const playerNumber = parseInt(player.playerId.split('_')[1], 10) || 0;
-                    const spreadFactor = 0.012 * Math.sin(playerNumber * Math.PI / 5);  // Reduced from 0.02
-                    player.position.y += spreadFactor;
-                }
-                
-                // Clamp to field boundaries
-                player.position.x = Math.max(0.05, Math.min(0.95, player.position.x));
-                player.position.y = Math.max(0.05, Math.min(0.95, player.position.y));
             }
         }
     }
@@ -372,14 +433,23 @@ function interpolatePosition(pos1, pos2, progress) {
     const dy = pos2.y - pos1.y;
     const distSquared = dx * dx + dy * dy;
     
-    // If positions are very far apart (teleport), don't interpolate
-    if (distSquared > 0.1) {
-        return pos2; // Just use the target position to avoid long visual traveling
+    // If positions are very far apart (teleport), don't interpolate smoothly
+    if (distSquared > 0.2) { // Increased from 0.1 for smoother long-distance movements
+        // Use modified ease-out for teleports to make it less jarring
+        const easedProgress = 1 - Math.pow(1 - progress, 3); // Cubic ease out
+        return {
+            x: pos1.x + dx * easedProgress,
+            y: pos1.y + dy * easedProgress
+        };
     }
     
+    // Apply smoother easing for natural movement
+    // Use custom ease-out function: cubic ease-out
+    const easedProgress = 1 - Math.pow(1 - progress, 3);
+    
     return {
-        x: pos1.x + (pos2.x - pos1.x) * progress,
-        y: pos1.y + (pos2.y - pos1.y) * progress
+        x: pos1.x + dx * easedProgress,
+        y: pos1.y + dy * easedProgress
     };
 }
 
@@ -390,32 +460,62 @@ function interpolateGameState(state1, state2, progress) {
     // Create a deep copy of state1 as the base
     const result = JSON.parse(JSON.stringify(state1));
     
-    // Interpolate ball position
+    // Use cubic easing for smoother transitions
+    let easedProgress = 1 - Math.pow(1 - progress, 3); // Cubic ease out
+    
+    // Interpolate ball position - use different easing for ball
     if (state1.ball?.position && state2.ball?.position) {
-        result.ball.position = interpolatePosition(state1.ball.position, state2.ball.position, progress);
+        // Ball should move a bit faster than players for realism
+        const ballEasedProgress = 1 - Math.pow(1 - progress, 2.5); // Slightly faster easing
+        result.ball.position = interpolatePosition(state1.ball.position, state2.ball.position, ballEasedProgress);
     }
     
     // Interpolate home team player positions
     if (state1.homeTeam?.players && state2.homeTeam?.players) {
         state1.homeTeam.players.forEach((player, index) => {
             if (index < state2.homeTeam.players.length && player.position && state2.homeTeam.players[index].position) {
+                // Calculate player-specific easing based on role
+                // Goalkeepers move more deliberately, strikers more dynamically
+                let playerEasing = easedProgress;
+                const playerId = player.playerId || '';
+                const playerNumber = parseInt(playerId.split('_')[1] || '0', 10);
+                
+                // Goalkeepers (0) move more deliberately, forwards (9, 10) more dynamically
+                if (playerNumber === 0) {
+                    playerEasing = 1 - Math.pow(1 - progress, 3.5); // Slower goalkeeper
+                } else if (playerNumber >= 9) {
+                    playerEasing = 1 - Math.pow(1 - progress, 2.8); // Quicker forwards
+                }
+                
                 result.homeTeam.players[index].position = interpolatePosition(
                     player.position,
                     state2.homeTeam.players[index].position,
-                    progress
+                    playerEasing
                 );
             }
         });
     }
     
-    // Interpolate away team player positions
+    // Interpolate away team player positions with similar role-based easing
     if (state1.awayTeam?.players && state2.awayTeam?.players) {
         state1.awayTeam.players.forEach((player, index) => {
             if (index < state2.awayTeam.players.length && player.position && state2.awayTeam.players[index].position) {
+                // Calculate player-specific easing based on role
+                let playerEasing = easedProgress;
+                const playerId = player.playerId || '';
+                const playerNumber = parseInt(playerId.split('_')[1] || '0', 10);
+                
+                // Goalkeepers (0) move more deliberately, forwards (9, 10) more dynamically
+                if (playerNumber === 0) {
+                    playerEasing = 1 - Math.pow(1 - progress, 3.5); // Slower goalkeeper
+                } else if (playerNumber >= 9) {
+                    playerEasing = 1 - Math.pow(1 - progress, 2.8); // Quicker forwards
+                }
+                
                 result.awayTeam.players[index].position = interpolatePosition(
                     player.position,
                     state2.awayTeam.players[index].position,
-                    progress
+                    playerEasing
                 );
             }
         });
@@ -650,11 +750,12 @@ function applyKickoffFormation(state) {
     // Clear ball possession
     result.ballPossession = null;
     
-    // Position home team (TeamA) players in kickoff formation
+    // Ensure all players are in their own half and respect the center line with minimal changes
+    // Home team (TeamA) positioned on left side, Away team (TeamB) on right
     if (result.homeTeam && result.homeTeam.players) {
         result.homeTeam.players.forEach((player, index) => {
             if (player.position) {
-                // Get player number for positioning
+                // Get player number
                 let playerNum = 1;
                 try {
                     playerNum = parseInt(player.playerId.split('_')[1], 10) || (index + 1);
@@ -662,19 +763,43 @@ function applyKickoffFormation(state) {
                     playerNum = index + 1;
                 }
                 
-                // Apply kickoff formation based on player number
-                const position = getKickoffPosition(playerNum, true, kickoffTeam === "TeamA");
-                player.position.x = position.x;
-                player.position.y = position.y;
+                // Only adjust positions if needed - make minimal changes
+                // Always fix goalkeeper position
+                if (playerNum === 1) {
+                    player.position.x = 0.1;
+                    player.position.y = 0.5;
+                } 
+                // For all other players
+                else {
+                    // Ensure TeamA players are on left side
+                    if (player.position.x > 0.49) {
+                        // Player is incorrectly positioned in opponent's half, fix by mirroring
+                        player.position.x = 0.49 - (player.position.x - 0.49);
+                    }
+                    
+                    // If we're the kickoff team, let one player be close to center line
+                    const isKickoffTeam = kickoffTeam === "TeamA";
+                    
+                    // For kickoff team, position one player nearby center
+                    if (isKickoffTeam && playerNum === 10) {
+                        player.position.x = 0.48; // Just behind center line
+                        // Keep y position with small adjustment to center
+                        player.position.y = 0.5 + (player.position.y - 0.5) * 0.5;
+                    }
+                    
+                    // Ensure players stay in bounds
+                    player.position.x = Math.max(0.05, Math.min(0.49, player.position.x));
+                    player.position.y = Math.max(0.05, Math.min(0.95, player.position.y));
+                }
             }
         });
     }
     
-    // Position away team (TeamB) players in kickoff formation
+    // Apply similar logic for away team (TeamB)
     if (result.awayTeam && result.awayTeam.players) {
         result.awayTeam.players.forEach((player, index) => {
             if (player.position) {
-                // Get player number for positioning
+                // Get player number
                 let playerNum = 1;
                 try {
                     playerNum = parseInt(player.playerId.split('_')[1], 10) || (index + 1);
@@ -682,129 +807,39 @@ function applyKickoffFormation(state) {
                     playerNum = index + 1;
                 }
                 
-                // Apply kickoff formation based on player number
-                const position = getKickoffPosition(playerNum, false, kickoffTeam === "TeamB");
-                player.position.x = position.x;
-                player.position.y = position.y;
+                // Only adjust positions if needed - make minimal changes
+                // Always fix goalkeeper position
+                if (playerNum === 1) {
+                    player.position.x = 0.9;
+                    player.position.y = 0.5;
+                } 
+                // For all other players
+                else {
+                    // Ensure TeamB players are on right side
+                    if (player.position.x < 0.51) {
+                        // Player is incorrectly positioned in opponent's half, fix by mirroring
+                        player.position.x = 0.51 + (0.51 - player.position.x);
+                    }
+                    
+                    // If we're the kickoff team, let one player be close to center line
+                    const isKickoffTeam = kickoffTeam === "TeamB";
+                    
+                    // For kickoff team, position one player nearby center
+                    if (isKickoffTeam && playerNum === 10) {
+                        player.position.x = 0.52; // Just ahead of center line
+                        // Keep y position with small adjustment to center
+                        player.position.y = 0.5 + (player.position.y - 0.5) * 0.5;
+                    }
+                    
+                    // Ensure players stay in bounds
+                    player.position.x = Math.max(0.51, Math.min(0.95, player.position.x));
+                    player.position.y = Math.max(0.05, Math.min(0.95, player.position.y));
+                }
             }
         });
     }
     
     return result;
-}
-
-// Helper function to get kickoff positions for players
-function getKickoffPosition(playerNumber, isHomeTeam, hasPossession) {
-    // Standard 4-4-2 formation with kickoff positions
-    const position = { x: 0, y: 0 };
-    
-    if (isHomeTeam) {
-        // Home team (TeamA) is on the left side
-        switch (playerNumber) {
-            case 1: // Goalkeeper
-                position.x = 0.1;
-                position.y = 0.5;
-                break;
-            case 2: // Right back
-                position.x = 0.2;
-                position.y = 0.25;
-                break;
-            case 3: // Center back
-                position.x = 0.2;
-                position.y = 0.4;
-                break;
-            case 4: // Center back
-                position.x = 0.2;
-                position.y = 0.6;
-                break;
-            case 5: // Left back
-                position.x = 0.2;
-                position.y = 0.75;
-                break;
-            case 6: // Right midfielder
-                position.x = 0.35;
-                position.y = 0.25;
-                break;
-            case 7: // Center midfielder
-                position.x = 0.35;
-                position.y = 0.4;
-                break;
-            case 8: // Center midfielder
-                position.x = 0.35;
-                position.y = 0.6;
-                break;
-            case 9: // Left midfielder
-                position.x = 0.35;
-                position.y = 0.75;
-                break;
-            case 10: // Striker
-                position.x = hasPossession ? 0.45 : 0.4;
-                position.y = 0.4;
-                break;
-            case 11: // Striker
-                position.x = hasPossession ? 0.45 : 0.4;
-                position.y = 0.6;
-                break;
-            default:
-                // Fallback positioning
-                position.x = 0.3;
-                position.y = 0.5 + (playerNumber * 0.05);
-        }
-    } else {
-        // Away team (TeamB) is on the right side
-        switch (playerNumber) {
-            case 1: // Goalkeeper
-                position.x = 0.9;
-                position.y = 0.5;
-                break;
-            case 2: // Right back
-                position.x = 0.8;
-                position.y = 0.25;
-                break;
-            case 3: // Center back
-                position.x = 0.8;
-                position.y = 0.4;
-                break;
-            case 4: // Center back
-                position.x = 0.8;
-                position.y = 0.6;
-                break;
-            case 5: // Left back
-                position.x = 0.8;
-                position.y = 0.75;
-                break;
-            case 6: // Right midfielder
-                position.x = 0.65;
-                position.y = 0.25;
-                break;
-            case 7: // Center midfielder
-                position.x = 0.65;
-                position.y = 0.4;
-                break;
-            case 8: // Center midfielder
-                position.x = 0.65;
-                position.y = 0.6;
-                break;
-            case 9: // Left midfielder
-                position.x = 0.65;
-                position.y = 0.75;
-                break;
-            case 10: // Striker
-                position.x = hasPossession ? 0.55 : 0.6;
-                position.y = 0.4;
-                break;
-            case 11: // Striker
-                position.x = hasPossession ? 0.55 : 0.6;
-                position.y = 0.6;
-                break;
-            default:
-                // Fallback positioning
-                position.x = 0.7;
-                position.y = 0.5 + (playerNumber * 0.05);
-        }
-    }
-    
-    return position;
 }
 
 // Helper function to calculate natural movement speed based on distance
@@ -815,21 +850,21 @@ function calculateMovementSpeed(currentX, currentY, targetX, targetY) {
     
     // Base speed plus distance-based adjustment
     // Slower for small movements, faster for longer distances
-    // All values reduced by ~40% for more realistic movement
+    // All values further reduced for more realistic movement
     let speed;
     if (distance < 0.05) {
         // Very close - move very slowly
-        speed = 0.0006 + distance * 0.006;  // Reduced from 0.001 + distance * 0.01
+        speed = 0.0004 + distance * 0.004;  // Reduced from 0.0006 + distance * 0.006
     } else if (distance < 0.2) {
         // Medium distance - normal movement
-        speed = 0.0018 + distance * 0.009;  // Reduced from 0.003 + distance * 0.015
+        speed = 0.0012 + distance * 0.006;  // Reduced from 0.0018 + distance * 0.009
     } else {
-        // Far away - faster movement
-        speed = 0.004 + distance * 0.012;  // Reduced from 0.007 + distance * 0.02
+        // Far away - faster movement but still controlled
+        speed = 0.0025 + distance * 0.008;  // Reduced from 0.004 + distance * 0.012
     }
     
     // Add a small random variation for more natural movement
-    speed *= (0.9 + Math.random() * 0.2);
+    speed *= (0.85 + Math.random() * 0.15); // Reduced randomness range
     
     return speed;
 }
@@ -872,6 +907,9 @@ function animationLoop(timestamp) {
             if (matchRestarting && kickoffAnimationStart) {
                 // During kickoff, ensure we use the kickoff formation regardless of other updates
                 const kickoffProgress = Math.min((timestamp - kickoffAnimationStart) / kickoffAnimationDuration, 1);
+                
+                // Apply cubic easing to make the motion more natural
+                const easedKickoffProgress = 1 - Math.pow(1 - kickoffProgress, 3);
                 
                 if (kickoffProgress >= 1) {
                     // Kickoff animation complete
@@ -919,7 +957,15 @@ function animationLoop(timestamp) {
                                 }
                                 
                                 // Apply natural easing movement with variable speed
-                                const speed = playerMovementSpeeds[playerKey] * (kickoffProgress < 0.3 ? 1.5 : 1.0);
+                                // Different roles move at different speeds
+                                let speedMultiplier = 1.0;
+                                if (idx === 0) speedMultiplier = 0.8; // Goalkeepers move slower
+                                else if (idx >= 9) speedMultiplier = 1.2; // Forwards move faster
+                                
+                                const speed = playerMovementSpeeds[playerKey] * 
+                                    speedMultiplier * 
+                                    (kickoffProgress < 0.3 ? 1.2 : 1.0); // Initial acceleration
+                                
                                 const dx = target.x - player.position.x;
                                 const dy = target.y - player.position.y;
                                 
@@ -955,7 +1001,15 @@ function animationLoop(timestamp) {
                                 }
                                 
                                 // Apply natural easing movement with variable speed
-                                const speed = playerMovementSpeeds[playerKey] * (kickoffProgress < 0.3 ? 1.5 : 1.0);
+                                // Different roles move at different speeds
+                                let speedMultiplier = 1.0;
+                                if (idx === 0) speedMultiplier = 0.8; // Goalkeepers move slower
+                                else if (idx >= 9) speedMultiplier = 1.2; // Forwards move faster
+                                
+                                const speed = playerMovementSpeeds[playerKey] * 
+                                    speedMultiplier * 
+                                    (kickoffProgress < 0.3 ? 1.2 : 1.0); // Initial acceleration
+                                
                                 const dx = target.x - player.position.x;
                                 const dy = target.y - player.position.y;
                                 
@@ -992,12 +1046,18 @@ function animationLoop(timestamp) {
                     previousGameState = latestGameState; // Reset previous to latest to prepare for next update
                     lastUpdateTime = timestamp;
                 } else {
-                    // Calculate smooth progress with easeOutQuad function for natural movement
+                    // Calculate smooth progress with improved easing for natural movement
                     interpolationProgress = Math.min((timestamp - lastUpdateTime) / stateDuration, 1);
-                    interpolationProgress = interpolationProgress * (2 - interpolationProgress); // Ease out quad
+                    
+                    // Use cubic ease-out for more natural movement
+                    // x = 1 - (1-t)³
+                    if (interpolationProgress < 1) {
+                        // Only apply easing if we're still interpolating
+                        // Easing is now handled in the interpolateGameState function
+                    }
                 }
                 
-                // Create interpolated state
+                // Create interpolated state with enhanced movement
                 interpolatedState = interpolateGameState(previousGameState, latestGameState, interpolationProgress);
                 
                 // Apply anti-swarming logic to prevent too many players around the ball
@@ -1005,8 +1065,8 @@ function animationLoop(timestamp) {
                 
                 // Add subtle natural movement to players when they seem stationary
                 // This makes them look more alive even when not moving much
-                if (interpolationProgress > 0.95) {
-                    // Apply subtle movement only when interpolation is nearly complete
+                if (interpolationProgress > 0.90) {
+                    // Apply subtle movement only when interpolation is mostly complete
                     applySubtleMovement(interpolatedState, timestamp);
                 }
             }
@@ -1022,7 +1082,7 @@ function animationLoop(timestamp) {
     if (latestGameState.status === 4 && goalCelebrationStart) {
         const elapsedCelebration = timestamp - goalCelebrationStart;
         // Pulsating effect on the ball during celebration
-        const pulseScale = 1 + 0.3 * Math.sin(elapsedCelebration / 150); 
+        const pulseScale = 1 + 0.3 * Math.sin(elapsedCelebration / 200); // Slowed down pulsing
         
         // Move players in celebration pattern (small circular movements)
         if (interpolatedState.homeTeam && interpolatedState.homeTeam.players) {
@@ -1032,8 +1092,9 @@ function animationLoop(timestamp) {
             
             interpolatedState.homeTeam.players.forEach((player, idx) => {
                 if (player.position) {
-                    const angle = (elapsedCelebration / 300) + (idx * Math.PI / 5);
-                    const radius = 0.02 * movementScale; // Small movement radius
+                    // Slower celebration movements
+                    const angle = (elapsedCelebration / 400) + (idx * Math.PI / 5); // Slowed from 300
+                    const radius = 0.015 * movementScale; // Reduced from 0.02
                     // Add oscillating motion to players
                     player.position.x += Math.cos(angle) * radius * 0.01;
                     player.position.y += Math.sin(angle) * radius * 0.01;
@@ -1052,8 +1113,9 @@ function animationLoop(timestamp) {
             
             interpolatedState.awayTeam.players.forEach((player, idx) => {
                 if (player.position) {
-                    const angle = (elapsedCelebration / 400) - (idx * Math.PI / 6);
-                    const radius = 0.015 * movementScale; // Smaller movement radius
+                    // Slower celebration movements
+                    const angle = (elapsedCelebration / 500) - (idx * Math.PI / 6); // Slowed from 400
+                    const radius = 0.012 * movementScale; // Reduced from 0.015
                     // Add oscillating motion to players
                     player.position.x += Math.cos(angle) * radius * 0.01;
                     player.position.y += Math.sin(angle) * radius * 0.01;
@@ -1067,7 +1129,7 @@ function animationLoop(timestamp) {
         // Animate the ball for celebration
         if (interpolatedState.ball && interpolatedState.ball.position) {
             // Make the ball bounce during celebration
-            const bounceFactor = Math.abs(Math.sin(elapsedCelebration / 200) * 0.05);
+            const bounceFactor = Math.abs(Math.sin(elapsedCelebration / 300) * 0.04); // Slowed from 200, reduced amplitude
             currentAnimatedBallPosition = {
                 x: interpolatedState.ball.position.x,
                 y: interpolatedState.ball.position.y - bounceFactor
@@ -1084,10 +1146,11 @@ function animationLoop(timestamp) {
             isPassing = false;
         } else {
             // Animate ball along pass trajectory with slight arc
-            const easedProgress = passProgress * (2 - passProgress); // Ease out quad
+            // Use a cubic ease-out for more natural motion
+            const easedProgress = 1 - Math.pow(1 - passProgress, 3);
             
             // Add an arc to the pass
-            const arcHeight = 0.05; // Maximum height of the arc
+            const arcHeight = 0.04; // Reduced from 0.05 for lower arc
             const arcFactor = Math.sin(easedProgress * Math.PI) * arcHeight;
             
             currentAnimatedBallPosition = {
@@ -1109,34 +1172,81 @@ function applySubtleMovement(state, timestamp) {
     if (!state) return;
     
     // Use timestamp to create subtle oscillation
-    const t = timestamp / 1000;
+    const t = timestamp / 1200; // Slowed down from 1000
     
     // Apply to home team
     if (state.homeTeam && state.homeTeam.players) {
         state.homeTeam.players.forEach((player, idx) => {
             if (player.position) {
                 // Use player index to offset the oscillation
-                const offset = idx * 0.5;
-                const wobble = Math.sin(t + offset) * 0.00018; // Reduced from 0.0003
+                const offset = idx * 0.7; // Increased from 0.5 for more varied movement
                 
-                // Apply a very subtle movement
-                player.position.x += Math.cos(t * 0.7 + offset) * 0.00012; // Reduced from 0.0002
-                player.position.y += wobble;
+                // Different player roles move differently
+                let moveFactor = 0.00008; // Base movement factor (reduced from 0.00012)
+                let wobbleFactor = 0.00010; // Base wobble factor (reduced from 0.00018)
+                
+                // Goalkeepers move less, forwards move more
+                if (idx === 0) { // Goalkeeper
+                    moveFactor *= 0.5;
+                    wobbleFactor *= 0.5;
+                } else if (idx >= 9) { // Forwards
+                    moveFactor *= 1.2;
+                    wobbleFactor *= 1.2;
+                }
+                
+                // Create natural-looking movement patterns with different frequencies
+                const wobble = Math.sin(t + offset) * wobbleFactor;
+                const sideMotion = Math.cos(t * 0.6 + offset) * moveFactor;
+                
+                // Consider ball possession - players with the ball move differently
+                const hasBall = player.playerId === state.ballPossession;
+                if (hasBall) {
+                    // Player with ball moves more as they control it
+                    player.position.x += Math.cos(t * 1.2 + offset) * moveFactor * 1.5;
+                    player.position.y += Math.sin(t * 1.5 + offset) * wobbleFactor * 1.5;
+                } else {
+                    // Standard subtle movement
+                    player.position.x += sideMotion;
+                    player.position.y += wobble;
+                }
             }
         });
     }
     
-    // Apply to away team
+    // Apply to away team with slight variations
     if (state.awayTeam && state.awayTeam.players) {
         state.awayTeam.players.forEach((player, idx) => {
             if (player.position) {
                 // Use player index to offset the oscillation
-                const offset = idx * 0.5;
-                const wobble = Math.sin(t + offset + 1.5) * 0.00018; // Reduced from 0.0003
+                const offset = idx * 0.7 + 2.1; // Different phase than home team
                 
-                // Apply a very subtle movement
-                player.position.x += Math.cos(t * 0.7 + offset + 1.5) * 0.00012; // Reduced from 0.0002
-                player.position.y += wobble;
+                // Different player roles move differently
+                let moveFactor = 0.00008; // Base movement factor
+                let wobbleFactor = 0.00010; // Base wobble factor
+                
+                // Goalkeepers move less, forwards move more
+                if (idx === 0) { // Goalkeeper
+                    moveFactor *= 0.5;
+                    wobbleFactor *= 0.5;
+                } else if (idx >= 9) { // Forwards
+                    moveFactor *= 1.2;
+                    wobbleFactor *= 1.2;
+                }
+                
+                const wobble = Math.sin(t * 0.9 + offset) * wobbleFactor;
+                const sideMotion = Math.cos(t * 0.7 + offset) * moveFactor;
+                
+                // Consider ball possession - players with the ball move differently
+                const hasBall = player.playerId === state.ballPossession;
+                if (hasBall) {
+                    // Player with ball moves more as they control it
+                    player.position.x += Math.cos(t * 1.3 + offset) * moveFactor * 1.5;
+                    player.position.y += Math.sin(t * 1.4 + offset) * wobbleFactor * 1.5;
+                } else {
+                    // Standard subtle movement
+                    player.position.x += sideMotion;
+                    player.position.y += wobble;
+                }
             }
         });
     }
