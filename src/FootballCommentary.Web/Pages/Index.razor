@@ -49,7 +49,7 @@
                         <div class="team-score">
                             <h3>@teamA: @(gameState?.HomeTeam?.Score ?? 0)</h3>
                         </div>
-                        <div class="game-timer scoreboard-timer">
+                        <div class="game-timer scoreboard-timer compact-timer">
                             <h3>@FormatGameTime(gameState?.GameTime)</h3>
                         </div>
                         <div class="team-score text-end">
@@ -208,144 +208,6 @@
             await JSRuntime.InvokeVoidAsync("updateGameState", state);
         });
         
-        hubConnection.On<GameState>("GameStateUpdated", async (state) =>
-        {
-            await InvokeAsync(async () =>
-            {
-                try 
-                {
-                    double minutes = 0;
-                    double seconds = 0;
-                    
-                    if (state?.GameTime != null)
-                    {
-                        minutes = state.GameTime.TotalMinutes;
-                        seconds = state.GameTime.TotalSeconds % 60;
-                    }
-                    
-                    Console.WriteLine($"[Blazor] GameStateUpdated event received. Status={state?.Status}, Time={minutes}:{seconds:00}");
-                    
-                    // Check if a goal was just scored (status is GoalScored)
-                    if (state?.Status == GameStatus.GoalScored && gameState?.Status != GameStatus.GoalScored)
-                    {
-                        Console.WriteLine("[Blazor] Goal scored detected from GameStateUpdated");
-                        
-                        // Default team is the one whose score increased
-                        string scoringTeam = state.LastScoringTeamId ?? 
-                            (state.HomeTeam.Score > (gameState?.HomeTeam?.Score ?? 0) ? "TeamA" : "TeamB");
-                        
-                        // Try to find the player who scored from recent commentary
-                        int? playerId = null;
-                        string playerName = "unknown player";
-                        
-                        // Get the latest commentary message
-                        var latestCommentary = commentaryMessages.FirstOrDefault();
-                        if (latestCommentary != null)
-                        {
-                            Console.WriteLine($"[Blazor] Looking for player name in commentary: {latestCommentary.Text}");
-                            
-                            // Examine all player names and find the first one mentioned in the commentary
-                            foreach (var homePlayerName in FootballCommentary.Core.Models.PlayerData.TeamAPlayerNames)
-                            {
-                                if (latestCommentary.Text.Contains(homePlayerName, StringComparison.OrdinalIgnoreCase))
-                                {
-                                    playerName = homePlayerName;
-                                    scoringTeam = "TeamA"; // Override team based on player name
-                                    playerId = FootballCommentary.Core.Models.PlayerData.GetPlayerIdByName("TeamA", playerName);
-                                    Console.WriteLine($"[Blazor] Found Team A player {playerName} with ID {playerId} in commentary");
-                                    break;
-                                }
-                            }
-                            
-                            // If no Team A player found, check Team B
-                            if (playerId == null)
-                            {
-                                foreach (var awayPlayerName in FootballCommentary.Core.Models.PlayerData.TeamBPlayerNames)
-                                {
-                                    if (latestCommentary.Text.Contains(awayPlayerName, StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        playerName = awayPlayerName;
-                                        scoringTeam = "TeamB"; // Override team based on player name
-                                        playerId = FootballCommentary.Core.Models.PlayerData.GetPlayerIdByName("TeamB", playerName);
-                                        Console.WriteLine($"[Blazor] Found Team B player {playerName} with ID {playerId} in commentary");
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        
-                        // If we couldn't identify the player from the commentary, use a fallback
-                        if (playerId == null)
-                        {
-                            // Default to a random player on the scoring team
-                            playerId = new Random().Next(1, 12);
-                            playerName = FootballCommentary.Core.Models.PlayerData.GetPlayerName(scoringTeam, playerId);
-                            Console.WriteLine($"[Blazor] Using fallback player {playerName} with ID {playerId}");
-                        }
-                        
-                        // Create a game event for the goal
-                        var goalEvent = new GameEvent
-                        {
-                            GameId = gameId,
-                            EventType = GameEventType.Goal,
-                            TeamId = scoringTeam,
-                            PlayerId = playerId,
-                            Position = new Position { X = 0.5, Y = 0.5 }
-                        };
-                        
-                        // Update the goal scorer
-                        await UpdateGoalScorer(goalEvent);
-                    }
-                    
-                    // Debug player positions
-                    int homePlayerCount = state?.HomeTeam?.Players?.Count ?? 0;
-                    int awayPlayerCount = state?.AwayTeam?.Players?.Count ?? 0;
-                    Console.WriteLine($"[Blazor] Player Counts: Home={homePlayerCount}, Away={awayPlayerCount}");
-                    if (state?.HomeTeam?.Players != null && homePlayerCount > 0)
-                    {
-                        var player = state.HomeTeam.Players[0];
-                        Console.WriteLine($"[Blazor] Home player[0] pos: x={player?.Position?.X}, y={player?.Position?.Y}");
-                    }
-                    if (state?.Ball?.Position != null)
-                    {
-                        Console.WriteLine($"[Blazor] Ball position: x={state.Ball.Position.X}, y={state.Ball.Position.Y}");
-                    }
-                    
-                    // Save the updated game state
-                    gameState = state;
-                    
-                    // Update Blazor UI immediately
-                    StateHasChanged();
-
-                    // Call the JavaScript function to update its state
-                    if (state != null) 
-                    {
-                        Console.WriteLine("[Blazor] Invoking JS: updateGameState...");
-                        await JSRuntime.InvokeVoidAsync("updateGameState", state);
-                        Console.WriteLine("[Blazor] JS: updateGameState invoked.");
-                    }
-                    else
-                    {
-                         Console.WriteLine("[Blazor] Skipping JS interop: state is null.");
-                    }
-                }
-                catch (JSException jsEx)
-                {
-                    // Catch specific JS interop exceptions
-                    Console.Error.WriteLine($"[Blazor] Error calling JS updateGameState: {jsEx.Message}");
-                }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"[Blazor] Error handling GameStateUpdated: {ex.GetType().Name} - {ex.Message}");
-                     if (ex.InnerException != null)
-                     {
-                         Console.Error.WriteLine($"  Inner Exc: {ex.InnerException.GetType().Name} - {ex.InnerException.Message}");
-                     }
-                     Console.Error.WriteLine($"  State Object: {(state == null ? "NULL" : System.Text.Json.JsonSerializer.Serialize(state))}"); // Log state on error
-                }
-            });
-        });
-        
         hubConnection.On<string, string, Position, object>("UpdatePlayerPosition", async (gameId, playerId, position, velocity) =>
         {
             if (gameId != this.gameId) return;
@@ -443,82 +305,83 @@
             StateHasChanged();
         });
 
-        hubConnection.On<GameEvent>("GameEventOccurred", async (gameEvent) =>
+        hubConnection.On<GameEvent>("ReceiveGameEvent", async (gameEvent) => 
         {
-            if (gameEvent.GameId != gameId) return;
-            
-            Console.WriteLine($"Game event received: {gameEvent.EventType} by {gameEvent.TeamId} player {gameEvent.PlayerId}");
-            
+            Console.WriteLine($"[Blazor] Received GameEvent: Type={gameEvent.EventType}, Team={gameEvent.TeamId}, PlayerId={gameEvent.PlayerId}");
             if (gameEvent.EventType == GameEventType.Goal)
             {
-                Console.WriteLine($"Goal scored by {gameEvent.TeamId} player {gameEvent.PlayerId}");
-                Console.WriteLine($"Debug: current goalScorers count = {goalScorers.Count}");
-                
-                // Check if we have a recent commentary message that might mention the player
-                var latestCommentary = commentaryMessages.FirstOrDefault();
-                if (latestCommentary != null)
+                // Use the reliable GameEvent to update the scorer list
+                await InvokeAsync(() => UpdateGoalScorer(gameEvent));
+            }
+            // Handle other specific game events if needed (e.g., display foul messages)
+        });
+
+        hubConnection.On<GameState>("GameStateUpdated", async (state) =>
+        {
+            await InvokeAsync(async () =>
+            {
+                try 
                 {
-                    Console.WriteLine($"Checking commentary for player name: {latestCommentary.Text}");
+                    double minutes = 0;
+                    double seconds = 0;
                     
-                    // Look for player names in the commentary
-                    string? teamId = gameEvent.TeamId;
-                    int? override_playerId = null;
-                    
-                    // Check Team A players
-                    foreach (var playerName in FootballCommentary.Core.Models.PlayerData.TeamAPlayerNames)
+                    if (state?.GameTime != null)
                     {
-                        if (latestCommentary.Text.Contains(playerName, StringComparison.OrdinalIgnoreCase))
-                        {
-                            override_playerId = FootballCommentary.Core.Models.PlayerData.GetPlayerIdByName("TeamA", playerName);
-                            teamId = "TeamA";
-                            Console.WriteLine($"Found Team A player {playerName} (ID: {override_playerId}) in commentary");
-                            break;
-                        }
+                        minutes = state.GameTime.TotalMinutes;
+                        seconds = state.GameTime.TotalSeconds % 60;
                     }
                     
-                    // Check Team B players if no Team A player was found
-                    if (override_playerId == null)
+                    Console.WriteLine($"[Blazor] GameStateUpdated event received. Status={state?.Status}, Time={minutes}:{seconds:00}");
+                    
+                    // Goal scoring events are now handled by the ReceiveGameEvent handler.
+                    
+                    // Debug player positions
+                    int homePlayerCount = state?.HomeTeam?.Players?.Count ?? 0;
+                    int awayPlayerCount = state?.AwayTeam?.Players?.Count ?? 0;
+                    Console.WriteLine($"[Blazor] Player Counts: Home={homePlayerCount}, Away={awayPlayerCount}");
+                    if (state?.HomeTeam?.Players != null && homePlayerCount > 0)
                     {
-                        foreach (var playerName in FootballCommentary.Core.Models.PlayerData.TeamBPlayerNames)
-                        {
-                            if (latestCommentary.Text.Contains(playerName, StringComparison.OrdinalIgnoreCase))
-                            {
-                                override_playerId = FootballCommentary.Core.Models.PlayerData.GetPlayerIdByName("TeamB", playerName);
-                                teamId = "TeamB";
-                                Console.WriteLine($"Found Team B player {playerName} (ID: {override_playerId}) in commentary");
-                                break;
-                            }
-                        }
+                        var player = state.HomeTeam.Players[0];
+                        Console.WriteLine($"[Blazor] Home player[0] pos: x={player?.Position?.X}, y={player?.Position?.Y}");
+                    }
+                    if (state?.Ball?.Position != null)
+                    {
+                        Console.WriteLine($"[Blazor] Ball position: x={state.Ball.Position.X}, y={state.Ball.Position.Y}");
                     }
                     
-                    // If we found a player in the commentary, create a modified game event
-                    if (override_playerId != null)
+                    // Save the updated game state
+                    gameState = state;
+                    
+                    // Update Blazor UI immediately
+                    StateHasChanged();
+
+                    // Call the JavaScript function to update its state
+                    if (state != null) 
                     {
-                        string playerName = FootballCommentary.Core.Models.PlayerData.GetPlayerName(teamId, override_playerId);
-                        Console.WriteLine($"Overriding player ID from {gameEvent.PlayerId} to {override_playerId} ({playerName})");
-                        
-                        // Create a modified game event with the correct player
-                        gameEvent = new GameEvent
-                        {
-                            GameId = gameEvent.GameId,
-                            EventType = gameEvent.EventType,
-                            TeamId = teamId,
-                            PlayerId = override_playerId,
-                            Position = gameEvent.Position,
-                            Timestamp = gameEvent.Timestamp,
-                            AdditionalData = gameEvent.AdditionalData
-                        };
+                        Console.WriteLine("[Blazor] Invoking JS: updateGameState...");
+                        await JSRuntime.InvokeVoidAsync("updateGameState", state);
+                        Console.WriteLine("[Blazor] JS: updateGameState invoked.");
+                    }
+                    else
+                    {
+                         Console.WriteLine("[Blazor] Skipping JS interop: state is null.");
                     }
                 }
-                
-                // Update goal scorers list with potentially modified gameEvent
-                await UpdateGoalScorer(gameEvent);
-                
-                Console.WriteLine($"Debug: updated goalScorers count = {goalScorers.Count}");
-                
-                // Force state update right after goal
-                StateHasChanged();
-            }
+                catch (JSException jsEx)
+                {
+                    // Catch specific JS interop exceptions
+                    Console.Error.WriteLine($"[Blazor] Error calling JS updateGameState: {jsEx.Message}");
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[Blazor] Error handling GameStateUpdated: {ex.GetType().Name} - {ex.Message}");
+                     if (ex.InnerException != null)
+                     {
+                         Console.Error.WriteLine($"  Inner Exc: {ex.InnerException.GetType().Name} - {ex.InnerException.Message}");
+                     }
+                     Console.Error.WriteLine($"  State Object: {(state == null ? "NULL" : System.Text.Json.JsonSerializer.Serialize(state))}"); // Log state on error
+                }
+            });
         });
     }
 

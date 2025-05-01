@@ -45,5 +45,10 @@ namespace FootballCommentary.Core.Abstractions
         /// Gets a description of the agent
         /// </summary>
         Task<string> GetDescriptionAsync();
+        
+        /// <summary>
+        /// Gets an LLM-generated tactical analysis of the current game state
+        /// </summary>
+        Task<string> GetTacticalAnalysisAsync(string gameId);
     }
 } 
