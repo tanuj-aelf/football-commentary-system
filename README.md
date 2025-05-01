@@ -1,18 +1,22 @@
+# AI Football Commentary System
+
 Real-time AI Football Game Master and Commentary System built with Orleans, SignalR, and the Aevatar Framework.
 
 ## Screenshots
-<img width="1728" alt="Screenshot 2025-04-24 at 8 49 24 AM" src="https://github.com/user-attachments/assets/448e1e8b-f472-4773-8a74-76bd501f3e68" />
-<img width="1728" alt="Screenshot 2025-04-24 at 8 49 39 AM" src="https://github.com/user-attachments/assets/49a3a868-4c5c-434e-9e7e-bb9f0c31a8c6" />
-<img width="1728" alt="Screenshot 2025-04-24 at 8 49 52 AM" src="https://github.com/user-attachments/assets/10374afb-51bf-4041-9a94-b09a88694c81" />
+<img width="1728" alt="Screenshot 2025-04-24 at 8 49 24 AM" src="https://github.com/user-attachments/assets/448e1e8b-f472-4773-8a74-76bd501f3e68" />
+<img width="1728" alt="Screenshot 2025-04-24 at 8 49 39 AM" src="https://github.com/user-attachments/assets/49a3a868-4c5c-434e-9e7e-bb9f0c31a8c6" />
+<img width="1728" alt="Screenshot 2025-04-24 at 8 49 52 AM" src="https://github.com/user-attachments/assets/10374afb-51bf-4041-9a94-b09a88694c81" />
 
 ## Overview
 
 This application demonstrates the use of AI agents with the Aevatar framework to create a live sports commentary system. The system includes:
 
-1. A simulated football (soccer) game with AI-controlled players
-2. A real-time commentary system that generates natural language commentary on game events using Google Gemini AI
-3. SignalR integration for pushing updates to connected clients
-4. A web-based visualization of the game
+1. A football (soccer) simulation with realistic player movements and ball physics
+2. Role-based AI player behavior with distinct movement patterns for goalkeepers, defenders, midfielders, and forwards
+3. Dynamic team formations and tactical adaptations during gameplay
+4. A real-time commentary system powered by Google Gemini AI that generates contextual, engaging commentary
+5. SignalR integration for pushing live updates to connected clients
+6. A responsive web-based visualization with real-time rendering of the match
 
 ## Architecture
 
@@ -26,14 +30,31 @@ The application is built with the following components:
 ## Key AI Agents
 
 ### GameStateGAgent
-- Manages the game state, player positions, and ball physics
-- Detects and publishes game events (goals, passes, etc.)
-- Provides a streaming API for real-time updates
+- Implements advanced simulation of game state, player movements, and ball physics
+- Features realistic player behavior based on roles (goalkeeper, defender, midfielder, forward)
+- Simulates natural player movements with momentum, team formation awareness, and tactical positioning
+- Manages ball physics including velocity, collisions, and goal detection
+- Detects and publishes various game events (goals, passes, shots, tackles, saves)
+- Provides a streaming API for real-time updates with 30ms refresh cycles
 
 ### CommentaryGAgent
-- Subscribes to game events and generates natural language commentary
-- Uses Google Gemini API to create varied and engaging commentary
+- Subscribes to game events and generates natural language commentary in real-time
+- Uses Google Gemini API to create varied, contextual, and engaging commentary
+- Supports different commentary types: play-by-play, background, summary, and match analysis
+- Includes throttling logic to prevent commentary overflow during rapid game events
 - Publishes commentary messages via SignalR to connected clients
+
+## Game Simulation Features
+
+The simulation includes several realistic gameplay elements:
+
+- **Player Movement**: Position-aware movements with natural variations, momentum, and formation adherence
+- **Ball Physics**: Realistic ball behavior with velocity, direction, and friction simulation
+- **Role-Based Behavior**: Players act differently based on their position (e.g., goalkeepers stay near goal, forwards press higher)
+- **Team Formations**: Support for different formations (4-4-2, 4-3-3, etc.) that influence player positioning
+- **Game Events**: Simulation of passes, shots, tackles, saves, and goals with appropriate physics and animations
+- **Time Scaling**: Compressed match time (90 minutes of game time in a few minutes of real time)
+- **Score Tracking**: Automatic goal detection and score management
 
 ## Getting Started
 
@@ -71,9 +92,9 @@ dotnet run
 1. When the web application loads, enter team names and click "Create Game"
 2. Click "Start Game" to begin the simulation
 3. The red team represents Team A and the blue team represents Team B
-4. Click "Kick Ball" to apply random velocity to the ball
-5. Use the "Goal Team A" and "Goal Team B" buttons to simulate goals
-6. Watch as the AI commentary system provides real-time commentary on the game events
+4. Watch as players move intelligently based on their positions and game situation
+5. Click "Kick Ball" to apply random velocity to the ball
+6. Observe the AI commentary system providing real-time commentary on the game events
 7. Click "End Game" to finish the current game
 
 ## Technologies Used
