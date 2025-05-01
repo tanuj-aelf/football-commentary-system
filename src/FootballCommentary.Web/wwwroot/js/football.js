@@ -4,7 +4,7 @@ let previousGameState = null;
 let interpolatedState = null; // Added for smooth interpolation
 let interpolationProgress = 0; // Progress between states (0 to 1)
 let lastUpdateTime = 0; // Timestamp of last state update
-let stateDuration = 600; // Duration between server updates in ms (increased from 400 for slower movement)
+let stateDuration = 50; // Reduced further from 70ms
 let lastServerUpdateTime = 0; // Track when we last received a server update
 let serverUpdateThreshold = 2000; // If no update in 2 seconds, reset interpolation
 let lastStateSignature = ""; // To detect actual changes in state
@@ -428,24 +428,11 @@ function getStateSignature(state) {
 function interpolatePosition(pos1, pos2, progress) {
     if (!pos1 || !pos2) return pos1 || pos2;
     
-    // Calculate distance between positions
     const dx = pos2.x - pos1.x;
     const dy = pos2.y - pos1.y;
-    const distSquared = dx * dx + dy * dy;
     
-    // If positions are very far apart (teleport), don't interpolate smoothly
-    if (distSquared > 0.2) { // Increased from 0.1 for smoother long-distance movements
-        // Use modified ease-out for teleports to make it less jarring
-        const easedProgress = 1 - Math.pow(1 - progress, 3); // Cubic ease out
-        return {
-            x: pos1.x + dx * easedProgress,
-            y: pos1.y + dy * easedProgress
-        };
-    }
-    
-    // Apply smoother easing for natural movement
-    // Use custom ease-out function: cubic ease-out
-    const easedProgress = 1 - Math.pow(1 - progress, 3);
+    // Use faster easing function (quadratic instead of cubic)
+    const easedProgress = 1 - Math.pow(1 - progress, 2);
     
     return {
         x: pos1.x + dx * easedProgress,
@@ -848,23 +835,18 @@ function calculateMovementSpeed(currentX, currentY, targetX, targetY) {
     const dy = targetY - currentY;
     const distance = Math.sqrt(dx * dx + dy * dy);
     
-    // Base speed plus distance-based adjustment
-    // Slower for small movements, faster for longer distances
-    // All values further reduced for more realistic movement
+    // Further increase base speed values for faster animations
     let speed;
     if (distance < 0.05) {
-        // Very close - move very slowly
-        speed = 0.0004 + distance * 0.004;  // Reduced from 0.0006 + distance * 0.006
+        speed = 0.0008 + distance * 0.008;  // Increased from 0.0006 + distance * 0.006
     } else if (distance < 0.2) {
-        // Medium distance - normal movement
-        speed = 0.0012 + distance * 0.006;  // Reduced from 0.0018 + distance * 0.009
+        speed = 0.0022 + distance * 0.011; // Increased from 0.0018 + distance * 0.009
     } else {
-        // Far away - faster movement but still controlled
-        speed = 0.0025 + distance * 0.008;  // Reduced from 0.004 + distance * 0.012
+        speed = 0.0045 + distance * 0.015; // Increased from 0.0035 + distance * 0.012
     }
     
-    // Add a small random variation for more natural movement
-    speed *= (0.85 + Math.random() * 0.15); // Reduced randomness range
+    // Keep random variation
+    speed *= (0.9 + Math.random() * 0.1); 
     
     return speed;
 }

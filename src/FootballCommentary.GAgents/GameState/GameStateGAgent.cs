@@ -65,8 +65,8 @@ namespace FootballCommentary.GAgents.GameState
         private const double FIELD_WIDTH = 1.0;
         private const double FIELD_HEIGHT = 1.0;
         private const double GOAL_WIDTH = 0.2;
-        private const double PLAYER_SPEED = 0.015; // Increased from 0.01
-        private const double BALL_SPEED = 0.025; // Increased from 0.02 for faster ball movement
+        private const double PLAYER_SPEED = 0.025; // Increased from 0.02
+        private const double BALL_SPEED = 0.04; // Increased from 0.035
         private const double GOAL_POST_X_TEAM_A = 0.05;
         private const double GOAL_POST_X_TEAM_B = 0.95;
         private const double PASSING_DISTANCE = 0.3;
@@ -873,11 +873,11 @@ namespace FootballCommentary.GAgents.GameState
                 existingTimer.Dispose();
             }
             
-            // Create a new simulation timer that updates every 100ms
+            // Reduce update interval further to 30ms
             var timerOptions = new GrainTimerCreationOptions
             {
-                DueTime = TimeSpan.FromMilliseconds(100),
-                Period = TimeSpan.FromMilliseconds(100),
+                DueTime = TimeSpan.FromMilliseconds(30), // Changed from 50ms
+                Period = TimeSpan.FromMilliseconds(30), // Changed from 50ms
                 Interleave = true // Allow timer callbacks to interleave with grain calls
             };
             var timer = this.RegisterGrainTimer(
@@ -898,8 +898,8 @@ namespace FootballCommentary.GAgents.GameState
                     return;
                 }
                 
-                // Publish state update every 5 steps (moved earlier)
-                if (game.Status != GameStatus.NotStarted && game.SimulationStep % 2 == 0) // Publish every 2 steps (200ms) for smoother updates
+                // Publish state update every step instead of every 2 steps
+                if (game.Status != GameStatus.NotStarted) 
                 {
                     await PublishGameStateUpdateAsync(game);
                 }
@@ -1031,9 +1031,9 @@ namespace FootballCommentary.GAgents.GameState
                 await UpdateTeamFormations(game);
             }
             
-            // Check if it's time to get new LLM suggestions (less frequent to reduce API calls)
-            // Only update LLM suggestions every ~25 steps (2.5 seconds) instead of 50 steps
-            bool useLLMSuggestions = game.SimulationStep % 25 == 0;
+            // Check if it's time to get new LLM suggestions
+            // Increase LLM update frequency to every 10 steps
+            bool useLLMSuggestions = game.SimulationStep % 10 == 0; // Changed from 15
             
             // Check if it's been enough time since the last LLM call
             if (useLLMSuggestions)
