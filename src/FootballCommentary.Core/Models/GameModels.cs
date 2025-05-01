@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Orleans.Concurrency;
+using System.Linq;
 
 namespace FootballCommentary.Core.Models
 {
@@ -91,6 +92,10 @@ namespace FootballCommentary.Core.Models
         [Id(8)] public string BallPossession { get; set; } = string.Empty;
         [Id(9)] public int SimulationStep { get; set; } = 0;
         [Id(10)] public string? LastScoringTeamId { get; set; }
+        
+        public IEnumerable<Player> AllPlayers => 
+            (HomeTeam?.Players ?? Enumerable.Empty<Player>())
+            .Concat(AwayTeam?.Players ?? Enumerable.Empty<Player>());
     }
 
     [Immutable]

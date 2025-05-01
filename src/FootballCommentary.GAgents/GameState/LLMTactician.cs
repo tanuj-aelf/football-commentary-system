@@ -23,6 +23,10 @@ namespace FootballCommentary.GAgents.GameState
         private Dictionary<string, DateTime> _movementCacheTimestamps = new();
         private const int MOVEMENT_CACHE_SECONDS = 3; // How long to use cached movements
         
+        // Track formations to ensure teams have different ones
+        private static Dictionary<string, TeamFormation> _lastSelectedFormations = new();
+        private static Random _random = new Random();
+        
         public LLMTactician(ILogger<LLMTactician> logger, ILLMService llmService)
         {
             _logger = logger;
@@ -182,54 +186,37 @@ namespace FootballCommentary.GAgents.GameState
         {
             try
             {
-                var teamName = isTeamA ? gameState.HomeTeam.Name : gameState.AwayTeam.Name;
-                var opponentName = isTeamA ? gameState.AwayTeam.Name : gameState.HomeTeam.Name;
-                var score = $"{gameState.HomeTeam.Score}-{gameState.AwayTeam.Score}";
-                var gameTimeMinutes = (int)gameState.GameTime.TotalMinutes;
+                // Create a unique key for the game and team
+                string gameKey = gameState.GameId;
+                string teamKey = isTeamA ? $"{gameKey}_TeamA" : $"{gameKey}_TeamB";
+                string opposingTeamKey = isTeamA ? $"{gameKey}_TeamB" : $"{gameKey}_TeamA";
                 
-                string promptTemplate = 
-                    "As a football manager, suggest ONE tactical formation for {0} against {1}. " +
-                    "Current score: {2}, Game time: {3} minutes. " +
-                    "Choose one of these formations: 4-4-2, 4-3-3, 4-2-3-1, 3-5-2, 5-3-2, 4-1-4-1. " +
-                    "Reply with ONLY the formation numbers (e.g., '4-3-3') and no other text.";
+                // Get all possible formation values
+                var allFormations = Enum.GetValues(typeof(TeamFormation)).Cast<TeamFormation>().ToList();
                 
-                string prompt = string.Format(
-                    promptTemplate,
-                    teamName,
-                    opponentName,
-                    score,
-                    gameTimeMinutes);
+                // Check if opposing team already has a selected formation
+                TeamFormation opposingFormation = TeamFormation.Formation_4_4_2; // Default
+                bool opposingTeamHasFormation = _lastSelectedFormations.TryGetValue(opposingTeamKey, out opposingFormation);
                 
-                _logger.LogDebug("LLM Formation Prompt: {prompt}", prompt);
-                
-                string response = await _llmService.GenerateCommentaryAsync(prompt);
-                
-                if (string.IsNullOrEmpty(response))
+                // Remove opposing team's formation from available options to ensure difference
+                if (opposingTeamHasFormation)
                 {
-                    _logger.LogWarning("LLM returned empty response for formation suggestion");
-                    return TeamFormation.Formation_4_4_2; // Default
+                    allFormations.Remove(opposingFormation);
                 }
                 
-                // Clean up response to extract just the formation
-                response = response.Trim();
+                // Generate a random index
+                int randomIndex = _random.Next(allFormations.Count);
+                TeamFormation randomFormation = allFormations[randomIndex];
                 
-                // Match known formation patterns
-                if (response.Contains("4-4-2"))
-                    return TeamFormation.Formation_4_4_2;
-                if (response.Contains("4-3-3"))
-                    return TeamFormation.Formation_4_3_3;
-                if (response.Contains("4-2-3-1"))
-                    return TeamFormation.Formation_4_2_3_1;
-                if (response.Contains("3-5-2"))
-                    return TeamFormation.Formation_3_5_2;
-                if (response.Contains("5-3-2"))
-                    return TeamFormation.Formation_5_3_2;
-                if (response.Contains("4-1-4-1"))
-                    return TeamFormation.Formation_4_1_4_1;
+                // Store the selected formation
+                _lastSelectedFormations[teamKey] = randomFormation;
                 
-                // Default formation if no match
-                _logger.LogWarning("Could not parse formation from LLM response: {response}", response);
-                return TeamFormation.Formation_4_4_2;
+                _logger.LogInformation(
+                    "Random formation selected for {Team}: {Formation}",
+                    isTeamA ? gameState.HomeTeam.Name : gameState.AwayTeam.Name,
+                    randomFormation);
+                
+                return randomFormation;
             }
             catch (Exception ex)
             {

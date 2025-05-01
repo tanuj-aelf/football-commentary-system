@@ -1,3 +1,5 @@
+/* Football Commentary System Styles - version 1.0.1 - Updated styles for timer */
+
 html, body {
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
 }
@@ -58,11 +60,14 @@ main {
     padding: 0.5rem 1rem;
     margin-top: 1rem;
     border-radius: 5px;
+    display: flex;
+    justify-content: space-between;
 }
 
 .scoreboard .d-flex {
     align-items: center;
     width: 100%;
+    justify-content: space-between;
 }
 
 .team-score {
@@ -80,6 +85,13 @@ main {
 .scoreboard-timer {
     flex: 1 1 auto;
     text-align: center;
+    background-color: rgba(255, 255, 255, 0.1);
+    padding: 2px 8px;
+    border-radius: 10px;
+    display: inline-block;
+    width: auto;
+    max-width: 110px;
+    margin: 0 auto;
 }
 
 .scoreboard h3 {
@@ -161,10 +173,12 @@ main {
     font-size: 24px;
     font-weight: bold;
     color: white;
-    padding: 5px 15px;
+    padding: 5px 7px;
     border-radius: 4px;
     text-align: center;
     flex-grow: 1;
+    max-width: 110px;
+    margin: 0 auto;
 }
 
 .game-timer h3 {
@@ -277,12 +291,8 @@ main {
     border-radius: 8px;
     margin-bottom: 20px;
     box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-}
-
-.scoreboard-timer {
-    background-color: rgba(255, 255, 255, 0.1);
-    padding: 5px 15px;
-    border-radius: 20px;
+    display: flex;
+    justify-content: space-between;
 }
 
 .team-score {
@@ -298,4 +308,15 @@ main {
     0% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0.4); }
     70% { box-shadow: 0 0 0 10px rgba(255, 193, 7, 0); }
     100% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0); }
+}
+
+/* Specific override for the compact timer */
+.compact-timer {
+    max-width: 110px !important;
+    padding: 2px 8px !important;
+    border-radius: 10px !important;
+    margin: 0 auto !important;
+    width: auto !important;
+    background-color: rgba(255, 255, 255, 0.1) !important;
+    display: inline-block !important;
 } 
