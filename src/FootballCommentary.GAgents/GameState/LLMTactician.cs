@@ -87,10 +87,13 @@ namespace FootballCommentary.GAgents.GameState
                 
                 // Simplified prompt to reduce token count and speed up response
                 string promptTemplate = 
-                    "As a football tactical AI, suggest movement vectors (dx, dy) " +
+                    "As a football tactical AI, suggest ULTRA-AGGRESSIVE and HIGH-RISK movement vectors (dx, dy) " +
                     "for team {0} players ({1} possession). " +
                     "Time: {2}m, Score: {3}, Ball at X:{4}, Y:{5}. " +
                     "{6}" +
+                    "PRIORITIZE GOALS above all else! Focus on direct attacking runs, shooting opportunities, and risky attacking positions. " +
+                    "Sacrifice defensive stability for spectacular attacking play. " +
+                    "Make forwards and midfielders extremely aggressive, and even defenders should join attacks frequently. " +
                     "Respond with JSON only: {{\"PlayerID\": {{\"dx\": value, \"dy\": value}}, ...}} " +
                     "with dx/dy values between -0.1 and 0.1.";
                 

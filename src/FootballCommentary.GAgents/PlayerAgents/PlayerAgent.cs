@@ -120,8 +120,8 @@ Opponent positions:
 
 {14}
 
-Based on your role as a {0}, determine the optimal movement vector (dx, dy) 
-between -0.1 and 0.1.
+Based on your role as a {0}, determine the EXTREMELY AGGRESSIVE and HIGH-RISK movement vector (dx, dy) 
+between -0.1 and 0.1. Take major risks to create dramatic goal-scoring opportunities!
 
 {15}
 
@@ -130,17 +130,17 @@ Respond with JSON only: {{""dx"": value, ""dy"": value}}";
             // Add role-specific guidance
             string roleGuidance = Role switch 
             {
-                "Goalkeeper" => "Focus on protecting the goal. Stay near your goal line and move primarily along the Y axis to intercept shots.",
-                "Defender" => "Your primary duty is defensive positioning. Maintain formation and mark opposing attackers. React to nearby opponents and cover dangerous spaces.",
-                "Midfielder" => "Balance between defense and attack. Support offense when your team has possession, fall back to defend when needed. Look for open passing lanes and space between opponents.",
-                "Forward" => "Focus on creating scoring opportunities. Make runs into space and get into shooting positions. Find gaps between defenders and make yourself available for passes.",
-                _ => "Play your position and support your teammates."
+                "Goalkeeper" => "Though protecting your goal is important, you should take EXTREME risks occasionally! Rush far off your line to intercept through balls, join attacks when your team is pushing forward, and be unpredictable in your positioning to surprise opponents.",
+                "Defender" => "Throw caution to the wind! Push AGGRESSIVELY forward into attack, overlap with your wingers, make daring runs through the center, and don't worry too much about getting back. Take risks with your tackles and intercepts - glory comes to the brave!",
+                "Midfielder" => "Be the ultimate playmaker and risk-taker! Drive forward aggressively with the ball, attempt ambitious long-range shots, make daring through passes, and press opponents relentlessly. Your movement should constantly surprise and overwhelm the opposition.",
+                "Forward" => "Play like a superstar striker! Take EXTREME risks to get into scoring positions, make direct runs at defenders, shoot from ANY angle or distance when possible, and constantly look to break behind the defense. Creating spectacular goal-scoring chances is your ONLY priority!",
+                _ => "Play with maximum aggression, take huge risks, and create spectacular moments for your team!"
             };
             
             // Add possession-specific instructions
             string possessionGuidance = hasPossession
-                ? "You currently have the ball. Consider passing to a teammate in a better position or moving toward the goal if there's an opportunity. Be aware of nearby opponents."
-                : "You don't have the ball. Position yourself to receive a pass or to intercept one from the opposing team. Create space and avoid being marked.";
+                ? "You currently have the ball - be EXTREMELY AGGRESSIVE! Look for the most direct path to goal, take on multiple defenders, attempt audacious shots from distance, or make high-risk creative passes. Fans want to see SPECTACULAR attacking play and GOALS!"
+                : "You don't have the ball - be EXTREMELY PROACTIVE! Make aggressive runs into dangerous spaces, position yourself for shooting opportunities, press opponents with maximum intensity. Take major risks to create goal-scoring opportunities or win back possession!";
                 
             // Get possession description
             string possession = DeterminePossessionDescription(gameState);

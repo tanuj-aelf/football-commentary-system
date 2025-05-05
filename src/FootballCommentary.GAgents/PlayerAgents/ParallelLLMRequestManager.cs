@@ -18,19 +18,19 @@ namespace FootballCommentary.GAgents.PlayerAgents
         private readonly Dictionary<string, (double dx, double dy)> _movementCache = new();
         
         // Time between API calls for the same player - increased due to larger context
-        private readonly TimeSpan _minTimeBetweenCalls = TimeSpan.FromSeconds(5);
+        private readonly TimeSpan _minTimeBetweenCalls = TimeSpan.FromSeconds(2);
         
         // Failure tracking
         private readonly Dictionary<string, int> _failureCount = new();
-        private const int MAX_FAILURES_BEFORE_TIMEOUT = 3;
+        private const int MAX_FAILURES_BEFORE_TIMEOUT = 4;
         private readonly Dictionary<string, DateTime> _timeoutUntil = new();
-        private readonly TimeSpan _timeoutDuration = TimeSpan.FromMinutes(1);
+        private readonly TimeSpan _timeoutDuration = TimeSpan.FromSeconds(30);
         
         // Configure with max concurrent requests and rate limiting
         public ParallelLLMRequestManager(
             ILLMService llmService, 
             ILogger<ParallelLLMRequestManager> logger,
-            int maxConcurrentRequests = 3) // Reduced from 5 to 3 for more stability with larger context
+            int maxConcurrentRequests = 11) // Increased from 7 to 11 for more parallel decision-making
         {
             _throttler = new SemaphoreSlim(maxConcurrentRequests);
             _llmService = llmService;

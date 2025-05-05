@@ -66,17 +66,17 @@ namespace FootballCommentary.GAgents.GameState
         // Game simulation constants
         private const double FIELD_WIDTH = 1.0;
         private const double FIELD_HEIGHT = 1.0;
-        private const double GOAL_WIDTH = 0.2;
-        private const double PLAYER_SPEED = 0.025; // Increased from 0.02
-        private const double BALL_SPEED = 0.04; // Increased from 0.035
+        private const double GOAL_WIDTH = 0.25; // Increased from 0.2 for wider goals
+        private const double PLAYER_SPEED = 0.035; // Increased from 0.03 for even faster player movement
+        private const double BALL_SPEED = 0.06; // Increased from 0.05 for faster ball movement
         private const double GOAL_POST_X_TEAM_A = 0.05;
         private const double GOAL_POST_X_TEAM_B = 0.95;
-        private const double PASSING_DISTANCE = 0.3;
-        private const double SHOOTING_DISTANCE = 0.25; // Increased from 0.20 to allow shots from further out
-        private const double POSITION_RECOVERY_WEIGHT = 0.01; // Reduced from 0.02
-        private const double BALL_ATTRACTION_WEIGHT = 0.05; // Increased from 0.04 to make players more attracted to ball
-        private const double PLAYER_ROLE_ADHERENCE = 0.02; // Reduced from 0.03 to allow more attacking freedom
-        private const double FORMATION_ADHERENCE = 0.01; // Reduced from 0.015 for more dynamic movement
+        private const double PASSING_DISTANCE = 0.4; // Increased from 0.35 for longer passes
+        private const double SHOOTING_DISTANCE = 0.4; // Increased from 0.3 to allow shots from much further out
+        private const double POSITION_RECOVERY_WEIGHT = 0.005; // Reduced from 0.008 for more free movement
+        private const double BALL_ATTRACTION_WEIGHT = 0.07; // Increased from 0.06 to make players more attracted to ball
+        private const double PLAYER_ROLE_ADHERENCE = 0.01; // Reduced from 0.015 to allow players to break position more
+        private const double FORMATION_ADHERENCE = 0.005; // Reduced from 0.008 for more dynamic movement
         
         // Field zones for more realistic positioning
         private const double DEFENSE_ZONE = 0.3;
@@ -89,12 +89,12 @@ namespace FootballCommentary.GAgents.GameState
         private readonly List<TackleAttempt> _recentTackleAttempts = new();
         
         // Tackle and ball control constants
-        private const double PLAYER_CONTROL_DISTANCE = 0.05;
-        private const double TACKLE_DISTANCE = 0.08;
-        private const double BASE_TACKLE_CHANCE = 0.25; // Reduced from 0.35 to make tackles less successful
+        private const double PLAYER_CONTROL_DISTANCE = 0.07; // Increased from 0.06
+        private const double TACKLE_DISTANCE = 0.12; // Increased from 0.1 for more tackles
+        private const double BASE_TACKLE_CHANCE = 0.15; // Reduced from 0.2 to make tackles even less successful
         
         // Add a new constant for loose ball attraction
-        private const double LOOSE_BALL_ATTRACTION = 0.08; // How strongly players are drawn to a loose ball
+        private const double LOOSE_BALL_ATTRACTION = 0.12; // Increased from 0.09 - players even more attracted to loose balls
         
         // These constants need to be defined at class level
         private const double GOAL_X_MIN = 0.45;
@@ -1163,7 +1163,7 @@ namespace FootballCommentary.GAgents.GameState
             Position ballPos = game.Ball?.Position ?? new Position { X = 0.5, Y = 0.5 };
             
             // Define the maximum distance goalkeeper can stray from goal
-            double maxDistance = 0.15; // Reduced from default (typically 0.2) to keep goalkeepers closer to the goal line
+            double maxDistance = 0.18; // Increased from 0.15 to make goalkeepers wander more
             
             // Determine if ball is in goalkeeper's half
             bool ballInOwnHalf = (isTeamA && ballPos.X < 0.5) || (!isTeamA && ballPos.X > 0.5);
@@ -1172,39 +1172,39 @@ namespace FootballCommentary.GAgents.GameState
             {
                 // Ball is in goalkeeper's half - be more aggressive
                 double targetX = isTeamA ? 
-                    Math.Min(goalPostX + 0.12, ballPos.X - 0.1) : // For Team A, move ahead but stay back from ball
-                    Math.Max(goalPostX - 0.12, ballPos.X + 0.1);  // For Team B, move ahead but stay back from ball
+                    Math.Min(goalPostX + 0.15, ballPos.X - 0.1) : // Increased from 0.12 - move further from goal
+                    Math.Max(goalPostX - 0.15, ballPos.X + 0.1);  // Increased from 0.12 - move further from goal
                     
                 // Move toward the target X
-                dx = (targetX - goalkeeper.Position.X) * 0.15; // Reduced from typical 0.2 for slower goalkeeper reactions
+                dx = (targetX - goalkeeper.Position.X) * 0.12; // Reduced from typical 0.15 for slower goalkeeper reactions
             }
             else
             {
                 // Ball is in opponent's half - stay close to goal line
-                double targetX = isTeamA ? goalPostX + 0.05 : goalPostX - 0.05; // Stay near goal line
+                double targetX = isTeamA ? goalPostX + 0.06 : goalPostX - 0.06; // Increased from 0.05 - stay further from goal line
                 
                 // Move toward the target X
-                dx = (targetX - goalkeeper.Position.X) * 0.1; // Reduced from typical 0.15 for slower goalkeeper positioning
+                dx = (targetX - goalkeeper.Position.X) * 0.08; // Reduced from 0.1 for even slower goalkeeper positioning
             }
             
-            // Y movement - follow ball's Y position with some lag
+            // Y movement - follow ball's Y position with significant lag
             double targetY = ballPos.Y;
             
-            // Add a bit of randomization to goalkeeper positioning - increased randomness
-            targetY += (_random.NextDouble() - 0.5) * 0.08; // Increased from typical 0.05 for less perfect positioning
+            // Add more randomization to goalkeeper positioning - increased randomness 
+            targetY += (_random.NextDouble() - 0.5) * 0.12; // Increased from 0.08 for less perfect positioning
             
             // Move toward target Y
-            dy = (targetY - goalkeeper.Position.Y) * 0.15; // Reduced from typical 0.25 for slower reactions
+            dy = (targetY - goalkeeper.Position.Y) * 0.12; // Reduced from 0.15 for slower reactions
             
             // Apply maximum movement speeds
-            dx = Math.Clamp(dx, -PLAYER_SPEED * 0.8, PLAYER_SPEED * 0.8); // Slower than typical players
-            dy = Math.Clamp(dy, -PLAYER_SPEED * 0.8, PLAYER_SPEED * 0.8); // Slower than typical players
+            dx = Math.Clamp(dx, -PLAYER_SPEED * 0.7, PLAYER_SPEED * 0.7); // Slower than typical players
+            dy = Math.Clamp(dy, -PLAYER_SPEED * 0.7, PLAYER_SPEED * 0.7); // Slower than typical players
             
             // Constrain goalkeeper to stay near goal
             goalkeeper.Position.X = Math.Clamp(goalkeeper.Position.X + dx, 
                 isTeamA ? goalPostX : goalPostX - maxDistance, 
                 isTeamA ? goalPostX + maxDistance : goalPostX);
-            goalkeeper.Position.Y = Math.Clamp(goalkeeper.Position.Y + dy, 0.3, 0.7);
+            goalkeeper.Position.Y = Math.Clamp(goalkeeper.Position.Y + dy, 0.25, 0.75); // Wider range (was 0.3-0.7)
             
             // Goalkeeper diving logic - if ball is very close to goal and moving toward it
             bool ballMovingTowardGoal = false;
@@ -1219,8 +1219,8 @@ namespace FootballCommentary.GAgents.GameState
                 Math.Pow(goalkeeper.Position.X - ballPos.X, 2) + 
                 Math.Pow(goalkeeper.Position.Y - ballPos.Y, 2));
             
-            // Reduced diving chance from 0.4 to 0.25 for less perfect saves
-            if (ballMovingTowardGoal && distanceToBall < 0.1 && _random.NextDouble() < 0.25)
+            // Reduced diving chance from 0.25 to 0.2 for less perfect saves
+            if (ballMovingTowardGoal && distanceToBall < 0.1 && _random.NextDouble() < 0.2)
             {
                 // Calculate direction to the ball for diving
                 double diveDx = ballPos.X - goalkeeper.Position.X;
@@ -1230,16 +1230,16 @@ namespace FootballCommentary.GAgents.GameState
                 if (diveDist > 0)
                 {
                     // Normalize and apply a dive in the ball's direction
-                    goalkeeper.Position.X += (diveDx / diveDist) * PLAYER_SPEED * 2;
-                    goalkeeper.Position.Y += (diveDy / diveDist) * PLAYER_SPEED * 2;
+                    goalkeeper.Position.X += (diveDx / diveDist) * PLAYER_SPEED * 1.8; // Reduced from 2.0 
+                    goalkeeper.Position.Y += (diveDy / diveDist) * PLAYER_SPEED * 1.8; // Reduced from 2.0
                     
                     // Check if goalkeeper catches the ball
                     distanceToBall = Math.Sqrt(
                         Math.Pow(goalkeeper.Position.X - ballPos.X, 2) + 
                         Math.Pow(goalkeeper.Position.Y - ballPos.Y, 2));
                     
-                    // Reduced catch chance from typical 0.7 to 0.4 for more goals
-                    if (distanceToBall < 0.05 && _random.NextDouble() < 0.4)
+                    // Reduced catch chance from 0.4 to 0.25 for more goals
+                    if (distanceToBall < 0.05 && _random.NextDouble() < 0.25)
                     {
                         // Goalkeeper catches the ball
                         game.BallPossession = goalkeeper.PlayerId;
@@ -2018,7 +2018,7 @@ namespace FootballCommentary.GAgents.GameState
                     {
                         // Calculate shot success probability based on distance to goal
                         // Closer shots have higher probability of success
-                        double successBaseProbability = 0.3; // Base 30% chance (down from 40%)
+                        double successBaseProbability = 0.6; // Increased from 0.4 to 0.6 for much higher scoring
                         
                         // Distance factor: shots from very close have higher probability
                         double distanceFactor = 1.0 - (distanceToGoal / SHOOTING_DISTANCE);
@@ -2028,20 +2028,20 @@ namespace FootballCommentary.GAgents.GameState
                         shooterPlayerNumber++; // Convert to 1-based index
                         
                         // Player role factor: forwards are better at shooting
-                        double roleFactor = 1.0;
+                        double roleFactor = 1.2; // Base factor increased from 1.0 to 1.2 for all players
                         bool shooterIsForward = shooterPlayerNumber >= 9;
                         bool shooterIsMidfielder = shooterPlayerNumber >= 6 && shooterPlayerNumber <= 8;
                         if (shooterIsForward) {
-                            roleFactor = 1.3; // Forwards are 30% better at shooting
+                            roleFactor = 1.5; // Increased from 1.4 - Forwards are 50% better at shooting
                         } else if (shooterIsMidfielder) {
-                            roleFactor = 1.1; // Midfielders are 10% better at shooting
+                            roleFactor = 1.4; // Increased from 1.2 - Midfielders are 40% better at shooting
                         }
                         
                         // Calculate final shot success probability
                         double shotSuccessProbability = successBaseProbability * distanceFactor * roleFactor;
                         
                         // Cap at a realistic maximum
-                        shotSuccessProbability = Math.Min(shotSuccessProbability, 0.7);
+                        shotSuccessProbability = Math.Min(shotSuccessProbability, 0.9); // Increased from 0.8 for even more scoring
                         
                         // Try to score
                         if (_random.NextDouble() < shotSuccessProbability)
@@ -2141,7 +2141,7 @@ namespace FootballCommentary.GAgents.GameState
                     
                     // Not close to goal, try to pass to teammates
                     // Base pass probability now increased from 5% to 15% for more frequent passing
-                    double passProbability = 0.15; 
+                    double passProbability = 0.08; // Reduced from 0.12 to increase shooting probability dramatically
                     
                     // Get player number to identify role
                     int playerNumber = possessorNumber; // already parsed earlier
@@ -2160,23 +2160,23 @@ namespace FootballCommentary.GAgents.GameState
                     // Adjust pass probability based on role and field position
                     if (isDefender && inDefensiveThird)
                     {
-                        passProbability = 0.35; // 35% chance to pass when defender is in own third
-                        _logger.LogDebug("Defender in defensive third - increased pass probability to 35%");
+                        passProbability = 0.3; // Reduced from 0.35 - Defenders pass less
+                        _logger.LogDebug("Defender in defensive third - increased pass probability to 30%");
                     }
                     else if (isMidfielder)
                     {
-                        passProbability = 0.22; // Midfielders pass more frequently in general
-                        _logger.LogDebug("Midfielder - base pass probability 22%");
+                        passProbability = 0.15; // Reduced from 0.20 - Midfielders more likely to shoot
+                        _logger.LogDebug("Midfielder - base pass probability 15%");
                     }
                     else if (isForward && inAttackingThird)
                     {
-                        passProbability = 0.18; // Forwards in attacking third slightly more likely to shoot than pass
-                        _logger.LogDebug("Forward in attacking third - pass probability 18%");
+                        passProbability = 0.1; // Reduced from 0.15 - Forwards much more likely to shoot
+                        _logger.LogDebug("Forward in attacking third - pass probability 10%");
                     }
                     else if (isForward && !inAttackingThird)
                     {
-                        passProbability = 0.28; // Forwards outside attacking third more likely to pass back
-                        _logger.LogDebug("Forward outside attacking third - pass probability 28%");
+                        passProbability = 0.2; // Reduced from 0.25 - Forwards more likely to shoot even outside attacking third
+                        _logger.LogDebug("Forward outside attacking third - pass probability 20%");
                     }
                     
                     // Increase pass probability if there are opponents nearby (under pressure)
@@ -2454,19 +2454,19 @@ namespace FootballCommentary.GAgents.GameState
                 return;
             }
 
-            // Expanded goal width - increased Y range to make goals easier to score
-            const double GOAL_X_MIN = 0.40; // Changed from 0.42 to make goal even wider
-            const double GOAL_X_MAX = 0.60; // Changed from 0.58 to make goal even wider
+            // Expanded goal width - massively increased Y range to make goals easier to score
+            const double GOAL_X_MIN = 0.35; // Changed from 0.38 to make goal even wider
+            const double GOAL_X_MAX = 0.65; // Changed from 0.62 to make goal even wider
             
-            // Only count goals if the ball is moving (i.e., has velocity) - prevents fake goals
-            bool ballIsMoving = Math.Abs(game.Ball.VelocityX) > 0.0005 || Math.Abs(game.Ball.VelocityY) > 0.0005; // Reduced from 0.001
+            // Only count goals if the ball is moving (i.e., has velocity) - with minimal requirements
+            bool ballIsMoving = Math.Abs(game.Ball.VelocityX) > 0.0001 || Math.Abs(game.Ball.VelocityY) > 0.0001; // Reduced from 0.0003
             
-            // Check that the ball is moving in the right direction for a goal - less strict requirements
-            bool isValidTeamBShot = game.Ball.VelocityX < -0.002; // Reduced from 0.003
-            bool isValidTeamAShot = game.Ball.VelocityX > 0.002;  // Reduced from 0.003
+            // Check that the ball is moving in the right direction for a goal - very lenient requirements
+            bool isValidTeamBShot = game.Ball.VelocityX < -0.0005; // Reduced from 0.001
+            bool isValidTeamAShot = game.Ball.VelocityX > 0.0005;  // Reduced from 0.001
 
             // Check if ball is in team A's goal - expanded goal areas
-            if (game.Ball.Position.X <= 0.04 && // Changed from 0.03 to 0.04
+            if (game.Ball.Position.X <= 0.06 && // Changed from 0.05 to 0.06
                 game.Ball.Position.Y >= GOAL_X_MIN && 
                 game.Ball.Position.Y <= GOAL_X_MAX &&
                 ballIsMoving && isValidTeamBShot) // Added velocity direction check
@@ -2532,7 +2532,7 @@ namespace FootballCommentary.GAgents.GameState
                 }
             }
             // Check if ball is in team B's goal - expanded goal areas
-            else if (game.Ball.Position.X >= 0.96 && // Changed from 0.97 to 0.96 
+            else if (game.Ball.Position.X >= 0.94 && // Changed from 0.95 to 0.94 
                      game.Ball.Position.Y >= GOAL_X_MIN && 
                      game.Ball.Position.Y <= GOAL_X_MAX &&
                      ballIsMoving && isValidTeamAShot) // Added velocity direction check

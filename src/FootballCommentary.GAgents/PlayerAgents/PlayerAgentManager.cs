@@ -17,7 +17,7 @@ namespace FootballCommentary.GAgents.PlayerAgents
         private readonly Dictionary<string, PlayerAgent> _playerAgents = new();
         
         // Maximum player agents to update with fresh LLM decisions per cycle
-        private const int MAX_API_CALLS_PER_CYCLE = 5;
+        private const int MAX_API_CALLS_PER_CYCLE = 9;
         
         public PlayerAgentManager(
             ILogger<PlayerAgentManager> logger,
@@ -150,24 +150,24 @@ namespace FootballCommentary.GAgents.PlayerAgents
             if (agent.Role == "Forward" && isAttacking)
             {
                 // Prioritize forwards in attacking situations
-                score += 30;
+                score += 40;
                 
                 // Higher priority for forwards in goal-scoring positions
                 if (IsInGoalScoringPosition(player, agent.IsTeamA, gameState))
-                    score += 20;
+                    score += 30;
                 
                 // Check if this forward is making a run behind defense
                 if (IsMakingRunBehindDefense(player, agent.IsTeamA, gameState, opponentPlayers))
-                    score += 25;
+                    score += 35;
             }
             else if (agent.Role == "Midfielder" && isTeamInPossession)
             {
                 // Prioritize midfielders when in possession for creative decisions
-                score += 25;
+                score += 30;
                 
                 // Higher priority if in open space - good for passing
                 if (IsInOpenSpace(player, opponentPlayers))
-                    score += 15;
+                    score += 20;
             }
             else if (agent.Role == "Defender" && !isTeamInPossession)
             {
@@ -176,23 +176,30 @@ namespace FootballCommentary.GAgents.PlayerAgents
                 
                 // Critical if this defender is the last line of defense
                 if (IsLastDefender(player, agent.IsTeamA, gameState, teamPlayers, opponentPlayers))
-                    score += 30;
+                    score += 25;
                 
                 // Critical if marking an opponent with the ball
                 if (IsMarkingBallPossessor(player, agent.IsTeamA, gameState, opponentPlayers))
-                    score += 35;
+                    score += 30;
             }
             else if (agent.Role == "Goalkeeper")
             {
                 // Goalkeeper priority based on ball distance to goal
                 double ballDistToGoal = CalculateDistanceToBallFromGoal(agent.IsTeamA, gameState);
                 if (ballDistToGoal < 0.3) // Ball is close to goal
-                    score += (1 - ballDistToGoal / 0.3) * 60;
+                    score += (1 - ballDistToGoal / 0.3) * 50;
             }
+            
+            // Boost score for attacking players even when not in optimal positions
+            if (agent.Role == "Forward" && !isAttacking)
+                score += 15;
+                
+            if (agent.Role == "Midfielder")
+                score += 10;
             
             // Important: Players involved in key tactical scenarios
             if (IsInKeySwitchOfPlayPosition(player, agent.IsTeamA, gameState, teamPlayers))
-                score += 20;
+                score += 25;
             
             // Increase priority for players who need to reposition based on formation
             if (IsOutOfPosition(player, agent.IsTeamA, gameState))
