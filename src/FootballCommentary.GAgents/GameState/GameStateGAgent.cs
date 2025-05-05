@@ -11,6 +11,7 @@ using Orleans.Streams;
 using Orleans.Timers;
 using System.Text;
 using System.Text.RegularExpressions;
+using FootballCommentary.GAgents.PlayerAgents;
 
 namespace FootballCommentary.GAgents.GameState
 {
@@ -58,6 +59,7 @@ namespace FootballCommentary.GAgents.GameState
         private readonly Random _random = new Random();
         private readonly ILLMService _llmService;
         private readonly LLMTactician _llmTactician;
+        private readonly PlayerAgentManager _playerAgentManager;
         private IStreamProvider? _streamProvider;
         private Dictionary<string, IDisposable> _gameSimulationTimers = new Dictionary<string, IDisposable>();
         
@@ -101,13 +103,27 @@ namespace FootballCommentary.GAgents.GameState
         public GameStateGAgent(
             ILogger<GameStateGAgent> logger,
             [PersistentState("gameState", "Default")] IPersistentState<GameStateGAgentState> state,
-            ILLMService llmService)
+            ILLMService llmService,
+            ILoggerFactory loggerFactory)
         {
             _logger = logger;
             _state = state;
             _llmService = llmService;
-            _llmTactician = new LLMTactician(
-                logger.CreateLoggerForCategory<LLMTactician>(), 
+            
+            // Create loggers using logger factory
+            var llmTacticianLogger = loggerFactory.CreateLogger<LLMTactician>();
+            var playerAgentLogger = loggerFactory.CreateLogger<PlayerAgent>();
+            var playerAgentManagerLogger = loggerFactory.CreateLogger<PlayerAgentManager>();
+            var requestManagerLogger = loggerFactory.CreateLogger<ParallelLLMRequestManager>();
+            
+            // Initialize LLM tactician
+            _llmTactician = new LLMTactician(llmTacticianLogger, llmService);
+            
+            // Initialize player agent manager
+            _playerAgentManager = new PlayerAgentManager(
+                playerAgentManagerLogger,
+                playerAgentLogger,
+                requestManagerLogger,
                 llmService);
         }
         
@@ -176,6 +192,9 @@ namespace FootballCommentary.GAgents.GameState
             // Initialize formations for both teams (default 4-4-2 initially, will be updated by AI)
             await InitializeTeamFormation(gameId, gameState, true);  // Team A
             await InitializeTeamFormation(gameId, gameState, false); // Team B
+            
+            // Initialize player agents
+            _playerAgentManager.InitializePlayerAgents(gameState);
             
             _state.State.Games[gameId] = gameState;
             await _state.WriteStateAsync();
@@ -581,6 +600,13 @@ namespace FootballCommentary.GAgents.GameState
             ResetPlayerPositions(game, true);  // Team A
             ResetPlayerPositions(game, false); // Team B
             
+            // Make sure player agents are initialized
+            if (!_playerAgentManager.HasPlayerAgent(game.HomeTeam.Players[0].PlayerId))
+            {
+                _logger.LogInformation("Initializing player agents at game start for {GameId}", gameId);
+                _playerAgentManager.InitializePlayerAgents(game);
+            }
+            
             await _state.WriteStateAsync();
             
             // Start game simulation
@@ -976,6 +1002,12 @@ namespace FootballCommentary.GAgents.GameState
                 // Convert to TimeSpan (this will be what's displayed on screen)
                 game.GameTime = TimeSpan.FromMinutes(scaledMinutes);
                 
+                // Check if it's time to update formations (every 30 seconds of game time)
+                if (game.SimulationStep % 300 == 0) // Every ~30 seconds
+                {
+                    await UpdateTeamFormations(game);
+                }
+                
                 // Randomly decide if we should publish an event
                 bool publishEvent = false;
                 GameEvent? gameEvent = null;
@@ -1013,247 +1045,109 @@ namespace FootballCommentary.GAgents.GameState
         
         private async Task MoveAllPlayers(FootballCommentary.Core.Models.GameState game)
         {
-            // Get all players from both teams
-            var homeTeamPlayers = game.HomeTeam.Players;
-            var awayTeamPlayers = game.AwayTeam.Players;
-            var allPlayers = homeTeamPlayers.Concat(awayTeamPlayers).ToList();
-
-            // Store the player with the ball
-            Player? playerWithBall = null;
-            if (!string.IsNullOrEmpty(game.BallPossession))
+            try
             {
-                playerWithBall = allPlayers.FirstOrDefault(p => p.PlayerId == game.BallPossession);
-            }
-
-            // Check if it's time to update formations (every 30 seconds of game time)
-            if (game.SimulationStep % 300 == 0) // Every ~30 seconds
-            {
-                await UpdateTeamFormations(game);
-            }
-            
-            // Check if it's time to get new LLM suggestions
-            // Increase LLM update frequency to every 10 steps
-            bool useLLMSuggestions = game.SimulationStep % 10 == 0; // Changed from 15
-            
-            // Check if it's been enough time since the last LLM call
-            if (useLLMSuggestions)
-            {
-                DateTime now = DateTime.UtcNow;
-                if (_state.State.LastLLMUpdateTimes.TryGetValue(game.GameId, out DateTime lastUpdate))
+                // Check if we should use the new agent-based approach
+                // Get player movement decisions from the player agent manager
+                var playerMovements = await _playerAgentManager.GetPlayerMovementsAsync(game);
+                
+                // Process special case for goalkeeper separately
+                var homeTeamPlayers = game.HomeTeam.Players;
+                var awayTeamPlayers = game.AwayTeam.Players;
+                var allPlayers = homeTeamPlayers.Concat(awayTeamPlayers).ToList();
+                
+                // Find the player with the ball
+                Player? playerWithBall = null;
+                if (!string.IsNullOrEmpty(game.BallPossession))
                 {
-                    // Only allow LLM calls if at least 1 second has passed
-                    if ((now - lastUpdate).TotalSeconds < 1)
+                    playerWithBall = allPlayers.FirstOrDefault(p => p.PlayerId == game.BallPossession);
+                }
+                
+                // Process movements for all players
+                foreach (var player in allPlayers)
+                {
+                    // Special case for goalkeepers
+                    bool isGoalkeeper = player.PlayerId.EndsWith("_0"); // ID format: TeamX_0 for goalkeepers
+                    if (isGoalkeeper)
                     {
-                        _logger.LogDebug("Skipping LLM call as only {Seconds} seconds have passed since last call", 
-                            (now - lastUpdate).TotalSeconds);
-                        useLLMSuggestions = false;
+                        MoveGoalkeeper(game, player, playerWithBall);
+                        continue;
                     }
-                }
-                
-                if (useLLMSuggestions)
-                {
-                    _state.State.LastLLMUpdateTimes[game.GameId] = now;
-                }
-            }
-            
-            // LLM movement suggestions for both teams
-            Dictionary<string, (double dx, double dy)> teamAMovementSuggestions = new Dictionary<string, (double dx, double dy)>();
-            Dictionary<string, (double dx, double dy)> teamBMovementSuggestions = new Dictionary<string, (double dx, double dy)>();
-            
-            // Get LLM movement suggestions if it's the right step
-            if (useLLMSuggestions)
-            {
-                // Check if team A has possession
-                bool isTeamAInPossession = !string.IsNullOrEmpty(game.BallPossession) && game.BallPossession.StartsWith("TeamA");
-                bool isTeamBInPossession = !string.IsNullOrEmpty(game.BallPossession) && game.BallPossession.StartsWith("TeamB");
-                
-                // Get movement suggestions for both teams
-                try
-                {
-                    // Run these in parallel to speed up processing
-                    var teamATasks = _llmTactician.GetMovementSuggestionsAsync(
-                        game, 
-                        homeTeamPlayers,
-                        true,
-                        isTeamAInPossession);
+                    
+                    // Special handling for player with ball
+                    if (player.PlayerId == game.BallPossession)
+                    {
+                        // If we have an agent-based movement for the ball possessor, use that with some adjustments
+                        if (playerMovements.TryGetValue(player.PlayerId, out var movement))
+                        {
+                            // Apply the agent's movement decision with some gameplay adjustments
+                            double dx = movement.dx;
+                            double dy = movement.dy;
+                            
+                            // Apply movement with boundary checking
+                            player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+                            player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
+                            
+                            // Update ball position to follow the player
+                            game.Ball.Position = player.Position;
+                            game.Ball.VelocityX = 0;
+                            game.Ball.VelocityY = 0;
+                        }
+                        else
+                        {
+                            // Fall back to default ball possessor movement
+                            MoveBallPossessor(game, player);
+                        }
+                        continue;
+                    }
+                    
+                    // Apply agent-based movement or fall back to rule-based
+                    if (playerMovements.TryGetValue(player.PlayerId, out var agentMovement))
+                    {
+                        _logger.LogDebug("Applying agent-based movement for player {PlayerId}: ({DX},{DY})", 
+                            player.PlayerId, agentMovement.dx, agentMovement.dy);
+                            
+                        // Apply the movement with some additional game dynamics
+                        double dx = agentMovement.dx;
+                        double dy = agentMovement.dy;
                         
-                    var teamBTasks = _llmTactician.GetMovementSuggestionsAsync(
-                        game, 
-                        awayTeamPlayers,
-                        false,
-                        isTeamBInPossession);
-                    
-                    // Wait for both to complete
-                    await Task.WhenAll(teamATasks, teamBTasks);
-                    
-                    // Get results
-                    teamAMovementSuggestions = await teamATasks;
-                    teamBMovementSuggestions = await teamBTasks;
+                        // Apply teammate avoidance to prevent crowding
+                        AvoidTeammates(game, player, ref dx, ref dy, player.PlayerId.StartsWith("TeamA"));
                         
-                    _logger.LogInformation("LLM movement suggestions received for both teams. Step: {Step}", game.SimulationStep);
-                    
-                    // Cache these movement suggestions in the formation data
-                    if (_state.State.TeamAFormations.TryGetValue(game.GameId, out var teamAFormation))
-                    {
-                        teamAFormation.CachedMovements = new Dictionary<string, (double dx, double dy)>(teamAMovementSuggestions);
-                        teamAFormation.LastUpdateTime = DateTime.UtcNow;
-                    }
-                    
-                    if (_state.State.TeamBFormations.TryGetValue(game.GameId, out var teamBFormation))
-                    {
-                        teamBFormation.CachedMovements = new Dictionary<string, (double dx, double dy)>(teamBMovementSuggestions);
-                        teamBFormation.LastUpdateTime = DateTime.UtcNow;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error getting LLM movement suggestions: {Message}", ex.Message);
-                }
-            }
-            else
-            {
-                // If not using LLM directly, generate more natural variations of cached suggestions
-                if (_state.State.TeamAFormations.TryGetValue(game.GameId, out var teamAFormation) && 
-                    teamAFormation.CachedMovements.Any())
-                {
-                    // Add variations to cached movements
-                    foreach (var (playerId, movement) in teamAFormation.CachedMovements)
-                    {
-                        // More natural movement variation - scale with game step for continuous motion
-                        double timeVariation = Math.Sin(game.SimulationStep * 0.1) * 0.007;
-                        double dx = movement.dx + timeVariation + (_random.NextDouble() - 0.5) * 0.015;
-                        double dy = movement.dy + timeVariation + (_random.NextDouble() - 0.5) * 0.015;
-                        
-                        // Clamp values
-                        dx = Math.Clamp(dx, -0.1, 0.1);
-                        dy = Math.Clamp(dy, -0.1, 0.1);
-                        
-                        teamAMovementSuggestions[playerId] = (dx, dy);
-                    }
-                }
-                else
-                {
-                    // If we don't have any cached movements, create natural idle movements for all players
-                    foreach (var player in homeTeamPlayers)
-                    {
-                        double timeVariation = Math.Sin(game.SimulationStep * 0.1 + _random.NextDouble() * 10) * 0.01;
-                        double dx = timeVariation + (_random.NextDouble() - 0.5) * 0.01;
-                        double dy = timeVariation + (_random.NextDouble() - 0.5) * 0.01;
-                        teamAMovementSuggestions[player.PlayerId] = (dx, dy);
-                    }
-                }
-                
-                if (_state.State.TeamBFormations.TryGetValue(game.GameId, out var teamBFormation) && 
-                    teamBFormation.CachedMovements.Any())
-                {
-                    // Add variations to cached movements
-                    foreach (var (playerId, movement) in teamBFormation.CachedMovements)
-                    {
-                        // More natural movement variation - scale with game step for continuous motion
-                        double timeVariation = Math.Sin(game.SimulationStep * 0.1 + Math.PI) * 0.007; // Offset for team B
-                        double dx = movement.dx + timeVariation + (_random.NextDouble() - 0.5) * 0.015;
-                        double dy = movement.dy + timeVariation + (_random.NextDouble() - 0.5) * 0.015;
-                        
-                        // Clamp values
-                        dx = Math.Clamp(dx, -0.1, 0.1);
-                        dy = Math.Clamp(dy, -0.1, 0.1);
-                        
-                        teamBMovementSuggestions[playerId] = (dx, dy);
-                    }
-                }
-                else
-                {
-                    // If we don't have any cached movements, create natural idle movements for all players
-                    foreach (var player in awayTeamPlayers)
-                    {
-                        double timeVariation = Math.Sin(game.SimulationStep * 0.1 + _random.NextDouble() * 10 + Math.PI) * 0.01;
-                        double dx = timeVariation + (_random.NextDouble() - 0.5) * 0.01;
-                        double dy = timeVariation + (_random.NextDouble() - 0.5) * 0.01;
-                        teamBMovementSuggestions[player.PlayerId] = (dx, dy);
-                    }
-                }
-            }
-
-            // Move each player based on their team's tactical objectives
-            foreach (var player in allPlayers)
-            {
-                // Special case for goalkeepers (player #1 on each team)
-                bool isGoalkeeper = player.PlayerId.EndsWith("_0"); // ID format: TeamX_0 for goalkeepers
-                
-                if (isGoalkeeper)
-                {
-                    MoveGoalkeeper(game, player, playerWithBall);
-                    continue;
-                }
-                
-                // Special handling for player with ball - prioritize forward movement
-                if (player.PlayerId == game.BallPossession)
-                {
-                    MoveBallPossessor(game, player);
-                    continue;
-                }
-                
-                bool isTeamA = player.PlayerId.StartsWith("TeamA");
-                bool isTeamInPossession = !string.IsNullOrEmpty(game.BallPossession) && 
-                    game.BallPossession.StartsWith(isTeamA ? "TeamA" : "TeamB");
-                
-                // Get player number for role assignment, handling potential parsing errors
-                int playerNumber = 0; // Default to 0 if parsing fails
-                try
-                {
-                    string playerIndexStr = player.PlayerId.Split('_')[1].Replace("Player", "");
-                    playerNumber = int.Parse(playerIndexStr) + 1; // Add 1 to adjust for 1-based roles
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to parse player number from PlayerId: {PlayerId}", player.PlayerId);
-                    // Optionally handle the error, e.g., skip this player or assign a default role
-                    continue; // Skip moving this player if ID is invalid
-                }
-                
-                // Calculate player's base position based on role
-                Position basePosition = GetBasePositionForRole(playerNumber, isTeamA, game.GameId);
-                
-                // Check if we have LLM suggestions for this player
-                var movementSuggestions = isTeamA ? teamAMovementSuggestions : teamBMovementSuggestions;
-                if (movementSuggestions.TryGetValue(player.PlayerId, out var suggestion))
-                {
-                    // Apply LLM-suggested movement with some adjustments for game logic
-                    double dx = suggestion.dx;
-                    double dy = suggestion.dy;
-                    
-                    // Add adherence to base position but with a weaker pull
-                    dx += (basePosition.X - player.Position.X) * POSITION_RECOVERY_WEIGHT * 0.4;
-                    dy += (basePosition.Y - player.Position.Y) * POSITION_RECOVERY_WEIGHT * 0.4;
-                    
-                    // Continuous fluctuation for more natural movement
-                    double cyclicVariation = Math.Sin(game.SimulationStep * 0.08 + playerNumber * 0.5) * 0.004;
-                    dx += cyclicVariation;
-                    dy += cyclicVariation * (_random.NextDouble() > 0.5 ? 1 : -1);
-                    
-                    // Avoid teammates crowding
-                    AvoidTeammates(game, player, ref dx, ref dy, isTeamA);
-                    
-                    // Apply movement with boundary checking
-                    player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
-                    player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
-                    
-                    _logger.LogDebug("Applied AI movement for player {PlayerId}: dx={dx}, dy={dy}", 
-                        player.PlayerId, dx, dy);
-                }
-                else
-                {
-                    // Fall back to rule-based movement logic
-                    // Apply different movement logic based on whether team is in possession
-                    if (isTeamInPossession)
-                    {
-                        MovePlayerWhenTeamHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                        // Apply the finalized movement with boundary checking
+                        player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+                        player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
                     }
                     else
                     {
-                        MovePlayerWhenOpponentHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                        // Fall back to rule-based behavior if no agent movement available
+                        bool isTeamA = player.PlayerId.StartsWith("TeamA");
+                        bool isTeamInPossession = !string.IsNullOrEmpty(game.BallPossession) && 
+                            game.BallPossession.StartsWith(isTeamA ? "TeamA" : "TeamB");
+                            
+                        int? playerNumber = TryParsePlayerId(player.PlayerId);
+                        if (!playerNumber.HasValue) continue;
+                            
+                        // Get player's base position from formation
+                        Position basePosition = GetBasePositionForRole(playerNumber.Value + 1, isTeamA, game.GameId);
+                        
+                        // Apply rule-based movement based on possession
+                        if (isTeamInPossession)
+                        {
+                            MovePlayerWhenTeamHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                        }
+                        else
+                        {
+                            MovePlayerWhenOpponentHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                        }
                     }
                 }
+                
+                _logger.LogDebug("Moved {Count} players using agent-based approach", playerMovements.Count);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in MoveAllPlayers: {Message}", ex.Message);
             }
         }
         
