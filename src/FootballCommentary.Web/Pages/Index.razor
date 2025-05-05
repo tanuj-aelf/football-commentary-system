@@ -159,7 +159,7 @@
     private int gameTimeSeconds = 0;
     private bool isGameTimerRunning = false;
     private DateTime? gameStartTime;
-    private static readonly TimeSpan GAME_DURATION = TimeSpan.FromSeconds(90); // 1 minute 30 seconds in real time = 90 minutes in game time
+    private static readonly TimeSpan GAME_DURATION = TimeSpan.FromMinutes(1.5); // 1.5 minutes in real time = 90 minutes in game time
 
     // Goal scorer class to track stats
     private class GoalScorer
@@ -316,11 +316,22 @@
         {
             Console.WriteLine($"[Blazor] GameEnded event received for game {gameId}");
             
-            // Make sure timer is reset when game ends
+            // Make sure timer is stopped when game ends but preserve the final time
             if (isGameTimerRunning)
             {
-                Console.WriteLine("[Blazor] Resetting game timer on GameEnded event");
-                ResetGameTimer();
+                Console.WriteLine("[Blazor] Stopping game timer on GameEnded event");
+                
+                // If the time is less than 90 minutes, set it to 90:00
+                if (gameTimeMinutes < 90)
+                {
+                    gameTimeMinutes = 90;
+                    gameTimeSeconds = 0;
+                }
+                
+                // Stop the timer without resetting the time
+                isGameTimerRunning = false;
+                gameStartTime = null;
+                
                 StateHasChanged();
             }
         });
@@ -333,12 +344,34 @@
                 // Use the reliable GameEvent to update the scorer list
                 await InvokeAsync(() => UpdateGoalScorer(gameEvent));
             }
-            else if (gameEvent.EventType == GameEventType.GameEnd && isGameTimerRunning)
+            else if (gameEvent.EventType == GameEventType.GameEnd)
             {
-                // Reset the timer when the game ends
-                Console.WriteLine("[Blazor] GameEnd event received, resetting timer");
+                // For GameEnd, save the final time rather than resetting to 0:00 immediately
+                Console.WriteLine("[Blazor] GameEnd event received, preserving final time");
                 await InvokeAsync(() => {
-                    ResetGameTimer();
+                    // If the event contains a game time, use it
+                    if (gameEvent.GameTime.HasValue)
+                    {
+                        gameTimeMinutes = (int)Math.Floor(gameEvent.GameTime.Value.TotalMinutes);
+                        gameTimeSeconds = gameEvent.GameTime.Value.Seconds;
+                        // Make sure we show at least 90:00
+                        if (gameTimeMinutes < 90)
+                        {
+                            gameTimeMinutes = 90;
+                            gameTimeSeconds = 0;
+                        }
+                    }
+                    else if (gameTimeMinutes < 90)
+                    {
+                        // Otherwise ensure at least 90:00 is shown
+                        gameTimeMinutes = 90;
+                        gameTimeSeconds = 0;
+                    }
+                    
+                    // Stop the timer but keep the time display
+                    isGameTimerRunning = false;
+                    gameStartTime = null;
+                    
                     StateHasChanged();
                 });
             }
@@ -612,37 +645,66 @@
         // Check if game has ended and stop timer if needed
         if (gameState?.Status == GameStatus.Ended && isGameTimerRunning)
         {
-            Console.WriteLine("[Blazor] Game status is Ended, stopping and resetting timer from OnTimerElapsed");
-            ResetGameTimer();
+            Console.WriteLine("[Blazor] Game status is Ended, stopping timer from OnTimerElapsed");
+            
+            // If the time is less than 90 minutes, set it to 90:00
+            if (gameTimeMinutes < 90)
+            {
+                gameTimeMinutes = 90;
+                gameTimeSeconds = 0;
+            }
+            
+            // Stop the timer without resetting the time
+            isGameTimerRunning = false;
+            gameStartTime = null;
+            
             needsStateChange = true;
         }
         
-        // Update game time if running
-        if (isGameTimerRunning && gameStartTime.HasValue)
+        // Prefer using server time if available
+        if (gameState?.GameTime != null && isGameTimerRunning)
+        {
+            // Use the server's game time instead of calculating locally
+            gameTimeMinutes = (int)Math.Floor(gameState.GameTime.TotalMinutes);
+            gameTimeSeconds = gameState.GameTime.Seconds;
+            needsStateChange = true;
+            
+            // If game is still in progress but has reached 90 minutes, don't reset the timer
+            // This keeps showing 90:00 until the server actually ends the game
+            if (gameTimeMinutes >= 90 && gameState.Status == GameStatus.InProgress)
+            {
+                gameTimeMinutes = 90;
+                gameTimeSeconds = 0;
+                needsStateChange = true;
+            }
+        }
+        // Fallback to local timer only if server time is not available
+        else if (isGameTimerRunning && gameStartTime.HasValue)
         {
             TimeSpan elapsed = DateTime.Now - gameStartTime.Value;
-            if (elapsed <= GAME_DURATION)
+            
+            // Convert elapsed real time to game minutes (0-90)
+            double totalGameMinutes = elapsed.TotalSeconds / GAME_DURATION.TotalSeconds * 90;
+            
+            // Cap at 90 minutes
+            if (totalGameMinutes > 90)
             {
-                // Convert elapsed real time to game minutes (0-90)
-                double totalGameMinutes = elapsed.TotalSeconds / GAME_DURATION.TotalSeconds * 90;
-                gameTimeMinutes = (int)Math.Floor(totalGameMinutes);
-                gameTimeSeconds = (int)Math.Floor((totalGameMinutes - gameTimeMinutes) * 60);
-                needsStateChange = true;
+                gameTimeMinutes = 90;
+                gameTimeSeconds = 0;
             }
             else
             {
-                // Game time finished - client-side timer has reached 90 minutes
-                gameTimeMinutes = 90;
-                gameTimeSeconds = 0;
-                isGameTimerRunning = false;
-                needsStateChange = true;
-                
-                // End the game on the server if it hasn't already
-                if (gameState?.Status == GameStatus.InProgress && hubConnection?.State == HubConnectionState.Connected)
-                {
-                    Console.WriteLine("[Blazor] Client timer reached 90 minutes, ending game");
-                    _ = EndGame(); // Don't await here to avoid blocking the timer
-                }
+                gameTimeMinutes = (int)Math.Floor(totalGameMinutes);
+                gameTimeSeconds = (int)Math.Floor((totalGameMinutes - gameTimeMinutes) * 60);
+            }
+            
+            needsStateChange = true;
+            
+            // Only end the game if we've reached 90 minutes AND the game is still in progress
+            if (totalGameMinutes >= 90 && gameState?.Status == GameStatus.InProgress && hubConnection?.State == HubConnectionState.Connected)
+            {
+                Console.WriteLine("[Blazor] Client timer reached 90 minutes, ending game");
+                _ = EndGame(); // Don't await here to avoid blocking the timer
             }
         }
             

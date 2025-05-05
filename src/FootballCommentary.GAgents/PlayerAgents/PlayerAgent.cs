@@ -107,8 +107,8 @@ Ball position: X:{7:F2}, Y:{8:F2}
 Ball possession: {9}
 
 Field orientation:
-- Team {2} attacks from left (X=0) to right (X=1)
-- Opponent team attacks from right (X=1) to left (X=0)
+- Team {2} attacks {16}
+- Opponent team attacks {17}
 - Your goal is at X={10}
 - Opponent goal is at X={11}
 
@@ -179,6 +179,15 @@ Respond with JSON only: {{""dx"": value, ""dy"": value}}";
             double ownGoalX = IsTeamA ? 0.05 : 0.95;
             double opponentGoalX = IsTeamA ? 0.95 : 0.05;
 
+            // Get proper field orientation descriptions based on team
+            string teamAttackDirection = IsTeamA ? 
+                "from left (X=0) to right (X=1)" : 
+                "from right (X=1) to left (X=0)";
+            
+            string opponentAttackDirection = IsTeamA ? 
+                "from right (X=1) to left (X=0)" : 
+                "from left (X=0) to right (X=1)";
+
             // Format the prompt with player data
             return string.Format(
                 promptTemplate,
@@ -197,7 +206,9 @@ Respond with JSON only: {{""dx"": value, ""dy"": value}}";
                 teammatesInfo.ToString().TrimEnd(),
                 opponentsInfo.ToString().TrimEnd(),
                 possessionGuidance,
-                roleGuidance
+                roleGuidance,
+                teamAttackDirection,
+                opponentAttackDirection
             );
         }
         

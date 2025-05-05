@@ -629,8 +629,16 @@ namespace FootballCommentary.GAgents.GameState
                 throw new KeyNotFoundException($"Game {gameId} not found");
             }
             
+            // Ensure game time is at least 90 minutes when ending
+            if (game.GameTime.TotalMinutes < 90)
+            {
+                game.GameTime = TimeSpan.FromMinutes(90);
+                _logger.LogInformation("Setting final game time to 90 minutes for game {GameId}", gameId);
+            }
+            
             game.Status = GameStatus.Ended;
             game.LastUpdateTime = DateTime.UtcNow;
+            game.FinalGameTime = game.GameTime; // Store the final game time
             
             // Stop game simulation
             if (_gameSimulationTimers.TryGetValue(gameId, out var timer))
@@ -641,11 +649,15 @@ namespace FootballCommentary.GAgents.GameState
             
             await _state.WriteStateAsync();
             
+            // Publish final game state update with the correct time
+            await PublishGameStateUpdateAsync(game);
+            
             // Publish game end event
             await PublishGameEventAsync(new GameEvent
             {
                 GameId = gameId,
-                EventType = GameEventType.GameEnd
+                EventType = GameEventType.GameEnd,
+                GameTime = game.GameTime // Include the final game time in the event
             });
             
             return game;
@@ -995,10 +1007,14 @@ namespace FootballCommentary.GAgents.GameState
                     return; // Not running or goal scored
                 }
                 
-                // Update game time
+                // Update game time with more precise calculation
                 var realElapsed = DateTime.UtcNow - game.GameStartTime;
-                // Scale real time: 1 real minute = 90 game minutes
-                var scaledMinutes = realElapsed.TotalMinutes * 90;
+                
+                // Scale real time: 1.5 real minutes = 90 game minutes
+                // This ensures we're using the same time scale as the client
+                double scaleFactor = 90 / 1.5; // 90 minutes / 1.5 minutes = 60
+                var scaledMinutes = realElapsed.TotalMinutes * scaleFactor;
+                
                 // Convert to TimeSpan (this will be what's displayed on screen)
                 game.GameTime = TimeSpan.FromMinutes(scaledMinutes);
                 
@@ -1032,8 +1048,11 @@ namespace FootballCommentary.GAgents.GameState
                 game.SimulationStep++;
                 
                 // End game after 90 minutes (game time)
+                // To avoid early termination, ensure we've actually reached 90 minutes
                 if (game.GameTime.TotalMinutes >= 90 && game.Status == GameStatus.InProgress)
                 {
+                    _logger.LogInformation("Game {GameId} reached 90 minutes, ending game. Total real time elapsed: {RealMinutes:F2} minutes", 
+                        gameId, realElapsed.TotalMinutes);
                     await EndGameAsync(gameId);
                 }
             }
