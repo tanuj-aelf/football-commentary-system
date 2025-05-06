@@ -100,6 +100,9 @@ namespace FootballCommentary.GAgents.GameState
         private const double GOAL_X_MIN = 0.45;
         private const double GOAL_X_MAX = 0.55;
         
+        // Add this field after the other private fields in the GameStateGAgent class (around line 100)
+        private readonly Dictionary<string, TimeSpan> _latestGameTimes = new Dictionary<string, TimeSpan>();
+        
         public GameStateGAgent(
             ILogger<GameStateGAgent> logger,
             [PersistentState("gameState", "Default")] IPersistentState<GameStateGAgentState> state,
@@ -606,6 +609,10 @@ namespace FootballCommentary.GAgents.GameState
             game.LastUpdateTime = DateTime.UtcNow;
             game.GameStartTime = DateTime.UtcNow;
             
+            // Reset game time tracking to ensure we start from 0
+            game.GameTime = TimeSpan.Zero;
+            _latestGameTimes[gameId] = TimeSpan.Zero;
+            
             // Reinitialize team formations to ensure random and different formations at game start
             _logger.LogInformation("Initializing team formations at game start for {GameId}", gameId);
             await InitializeTeamFormation(gameId, game, true);  // Team A
@@ -650,6 +657,8 @@ namespace FootballCommentary.GAgents.GameState
             if (game.GameTime.TotalMinutes < 90)
             {
                 game.GameTime = TimeSpan.FromMinutes(90);
+                // Also update the latest game time tracking
+                _latestGameTimes[gameId] = TimeSpan.FromMinutes(90);
                 _logger.LogInformation("Setting final game time to 90 minutes for game {GameId}", gameId);
             }
             
@@ -663,6 +672,9 @@ namespace FootballCommentary.GAgents.GameState
                 timer.Dispose();
                 _gameSimulationTimers.Remove(gameId);
             }
+            
+            // Clean up the latest game time tracking
+            _latestGameTimes.Remove(gameId);
             
             await _state.WriteStateAsync();
             
@@ -1033,7 +1045,29 @@ namespace FootballCommentary.GAgents.GameState
                 var scaledMinutes = realElapsed.TotalMinutes * scaleFactor;
                 
                 // Convert to TimeSpan (this will be what's displayed on screen)
-                game.GameTime = TimeSpan.FromMinutes(scaledMinutes);
+                var calculatedGameTime = TimeSpan.FromMinutes(scaledMinutes);
+                
+                // Check if we have a stored latest time for this game
+                if (!_latestGameTimes.TryGetValue(gameId, out var latestTime))
+                {
+                    // First time tracking this game
+                    _latestGameTimes[gameId] = calculatedGameTime;
+                    latestTime = calculatedGameTime;
+                }
+                // Only update the time if the calculated time is greater than our stored latest time
+                else if (calculatedGameTime > latestTime)
+                {
+                    _latestGameTimes[gameId] = calculatedGameTime;
+                    latestTime = calculatedGameTime;
+                }
+                else
+                {
+                    _logger.LogDebug("Calculated time {CalculatedTime} is less than or equal to latest time {LatestTime}, keeping latest time", 
+                        calculatedGameTime, latestTime);
+                }
+                
+                // Always use the latest valid time
+                game.GameTime = latestTime;
                 
                 // Check if it's time to update formations (every 30 seconds of game time)
                 if (game.SimulationStep % 300 == 0) // Every ~30 seconds

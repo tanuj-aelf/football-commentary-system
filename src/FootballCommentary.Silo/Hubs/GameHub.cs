@@ -145,6 +145,9 @@ namespace FootballCommentary.Silo.Hubs
         private static readonly Dictionary<string, StreamSubscriptionHandle<GameStateUpdate>> _gameStateSubscriptions = new();
         // Add a dictionary to store GameEvent stream subscriptions
         private static readonly Dictionary<string, StreamSubscriptionHandle<GameEvent>> _gameEventSubscriptions = new();
+        // Add this dictionary after the other static dictionaries
+        private static readonly Dictionary<string, TimeSpan> _latestGameTimes = new();
+        private static readonly object _gameTimeLock = new object();
 
         public GameHub(IClusterClient clusterClient, ILogger<GameHub> logger, IHubContext<GameHub> hubContext)
         {
@@ -207,6 +210,47 @@ namespace FootballCommentary.Silo.Hubs
             }
         }
 
+        // Helper method to update and get the latest game time
+        private TimeSpan GetLatestGameTime(string gameId, FootballCommentary.Core.Models.GameState gameState)
+        {
+            lock (_gameTimeLock)
+            {
+                // If we don't have a previous time or the new time is greater, update our record
+                if (!_latestGameTimes.TryGetValue(gameId, out var latestTime) ||
+                    gameState.GameTime > latestTime)
+                {
+                    _latestGameTimes[gameId] = gameState.GameTime;
+                    return gameState.GameTime;
+                }
+                
+                // Otherwise, ensure we use the latest time we've seen
+                if (gameState.GameTime < latestTime)
+                {
+                    _logger.LogDebug("Replacing time {CurrentTime} with latest time {LatestTime} for game {GameId}",
+                        gameState.GameTime, latestTime, gameId);
+                    gameState.GameTime = latestTime;
+                }
+                
+                return latestTime;
+            }
+        }
+
+        // Helper method to update game state before sending to clients
+        private void EnsureConsistentGameState(FootballCommentary.Core.Models.GameState gameState)
+        {
+            if (gameState == null) return;
+            
+            // Update the game time to ensure it never goes backward
+            GetLatestGameTime(gameState.GameId, gameState);
+            
+            // Ensure player lists aren't null for UI safety
+            if (gameState.HomeTeam != null && gameState.HomeTeam.Players == null)
+                gameState.HomeTeam.Players = new List<Player>();
+                
+            if (gameState.AwayTeam != null && gameState.AwayTeam.Players == null)
+                gameState.AwayTeam.Players = new List<Player>();
+        }
+
         public async Task JoinGame(string gameId)
         {
             try
@@ -232,18 +276,8 @@ namespace FootballCommentary.Silo.Hubs
                 var gameStateAgent = _clusterClient.GetGrain<IGameStateAgent>(grainId);
                 var gameState = await gameStateAgent.GetGameStateAsync(gameId);
                 
-                // Ensure Players lists are initialized and populated
-                if (gameState.HomeTeam?.Players == null || gameState.HomeTeam.Players.Count == 0)
-                {
-                    _logger.LogWarning("Home team players list is null or empty for game {GameId}", gameId);
-                    if (gameState.HomeTeam != null) gameState.HomeTeam.Players = new List<Player>();
-                }
-                
-                if (gameState.AwayTeam?.Players == null || gameState.AwayTeam.Players.Count == 0)
-                {
-                    _logger.LogWarning("Away team players list is null or empty for game {GameId}", gameId);
-                    if (gameState.AwayTeam != null) gameState.AwayTeam.Players = new List<Player>();
-                }
+                // Ensure game state is consistent
+                EnsureConsistentGameState(gameState);
                 
                 // Send the current game state to the caller
                 await Clients.Caller.SendAsync("ReceiveGameState", gameState);
@@ -334,6 +368,15 @@ namespace FootballCommentary.Silo.Hubs
                 var gameStateAgent = _clusterClient.GetGrain<IGameStateAgent>(grainId);
                 var gameState = await gameStateAgent.StartGameAsync(gameId);
                 
+                // Reset the latest game time for this game to zero when starting
+                lock (_gameTimeLock)
+                {
+                    _latestGameTimes[gameId] = TimeSpan.Zero;
+                }
+                
+                // Ensure game state is consistent
+                EnsureConsistentGameState(gameState);
+                
                 await Clients.Group(gameId).SendAsync("GameStateUpdated", gameState);
             }
             catch (Exception ex)
@@ -357,6 +400,15 @@ namespace FootballCommentary.Silo.Hubs
                 var gameStateAgent = _clusterClient.GetGrain<IGameStateAgent>(grainId);
                 var gameState = await gameStateAgent.EndGameAsync(gameId);
                 
+                // Ensure game state is consistent
+                EnsureConsistentGameState(gameState);
+                
+                // Game is ended - clean up time tracking
+                lock (_gameTimeLock)
+                {
+                    _latestGameTimes.Remove(gameId);
+                }
+                
                 // Stop commentary polling for this game
                 CommentaryPollingManager.StopPolling(gameId);
 
@@ -368,7 +420,7 @@ namespace FootballCommentary.Silo.Hubs
                 
                 _logger.LogInformation("Game {GameId} ended by hub request.", gameId);
                 
-                // Optionally notify clients game has ended
+                // Notify clients game has ended
                 await Clients.Group(gameId).SendAsync("GameEnded", gameId);
                 
                 // --- Unsubscribe from streams on game end --- 
@@ -442,6 +494,10 @@ namespace FootballCommentary.Silo.Hubs
                 
                 // Get updated game state and send to clients
                 var gameState = await gameStateAgent.GetGameStateAsync(gameId);
+                
+                // Ensure game state is consistent
+                EnsureConsistentGameState(gameState);
+                
                 await Clients.Group(gameId).SendAsync("GameStateUpdated", gameState);
                 
                 // NEW: Manually fetch and broadcast latest commentary after action
@@ -477,6 +533,10 @@ namespace FootballCommentary.Silo.Hubs
                 
                 // Get updated game state and send to clients
                 var gameState = await gameStateAgent.GetGameStateAsync(gameId);
+                
+                // Ensure game state is consistent
+                EnsureConsistentGameState(gameState);
+                
                 await Clients.Group(gameId).SendAsync("GameStateUpdated", gameState);
                 
                 // Fetch and broadcast latest commentary after goal
@@ -593,6 +653,9 @@ namespace FootballCommentary.Silo.Hubs
                 
                 var gameStateAgent = _clusterClient.GetGrain<IGameStateAgent>(grainId);
                 var gameState = await gameStateAgent.GetGameStateAsync(gameId);
+                
+                // Ensure game state is consistent
+                EnsureConsistentGameState(gameState);
                 
                 // Send the updated state to the requesting client only
                 await Clients.Caller.SendAsync("GameStateUpdated", gameState);
