@@ -6,6 +6,7 @@ using FootballCommentary.Core.Abstractions;
 using FootballCommentary.Core.Models;
 using Microsoft.Extensions.Logging;
 using System.Text;
+using FootballCommentary.GAgents.GameState;
 
 namespace FootballCommentary.GAgents.PlayerAgents
 {
@@ -28,6 +29,11 @@ namespace FootballCommentary.GAgents.PlayerAgents
         public bool IsTeamA { get; private set; }
         public string TeamName { get; private set; }
         
+        // Formation data
+        public TeamFormation CurrentFormation { get; private set; }
+        public string FormationRole { get; private set; } // Specific role in formation (e.g. "Central Defender", "Attacking Midfielder")
+        public Position BasePosition { get; private set; } // Base position in current formation
+        
         public PlayerAgent(
             string playerId, 
             ILLMService llmService, 
@@ -35,7 +41,10 @@ namespace FootballCommentary.GAgents.PlayerAgents
             string role,
             int positionNumber,
             bool isTeamA,
-            string teamName)
+            string teamName,
+            TeamFormation formation = TeamFormation.Formation_4_4_2,
+            string formationRole = "",
+            Position basePosition = null)
         {
             _playerId = playerId;
             _llmService = llmService;
@@ -44,6 +53,94 @@ namespace FootballCommentary.GAgents.PlayerAgents
             PositionNumber = positionNumber;
             IsTeamA = isTeamA;
             TeamName = teamName;
+            CurrentFormation = formation;
+            FormationRole = formationRole ?? DetermineFormationRole(formation, positionNumber);
+            BasePosition = basePosition ?? new Position { X = 0.5, Y = 0.5 };
+        }
+        
+        // Method to update formation information when formation changes
+        public void UpdateFormation(TeamFormation formation, string formationRole, Position basePosition)
+        {
+            CurrentFormation = formation;
+            FormationRole = formationRole ?? DetermineFormationRole(formation, PositionNumber);
+            BasePosition = basePosition;
+            _logger.LogDebug("Player {PlayerId} formation updated to {Formation}, role: {Role}", 
+                PlayerId, formation, FormationRole);
+                
+            // Clear movement cache when formation changes
+            _lastDecisionTime = DateTime.MinValue;
+        }
+        
+        // Helper method to determine specific formation role based on position number and formation
+        public string DetermineFormationRole(TeamFormation formation, int positionNumber)
+        {
+            // Player 1 is always goalkeeper
+            if (positionNumber == 1)
+                return "Goalkeeper";
+                
+            // Based on formation and position number, determine specific role
+            switch (formation)
+            {
+                case TeamFormation.Formation_4_4_2:
+                    if (positionNumber >= 2 && positionNumber <= 5)
+                        return positionNumber == 2 || positionNumber == 5 ? "Full Back" : "Center Back";
+                    else if (positionNumber >= 6 && positionNumber <= 9)
+                        return positionNumber == 6 || positionNumber == 9 ? "Winger" : "Center Midfielder";
+                    else
+                        return "Striker";
+                
+                case TeamFormation.Formation_4_3_3:
+                    if (positionNumber >= 2 && positionNumber <= 5)
+                        return positionNumber == 2 || positionNumber == 5 ? "Full Back" : "Center Back";
+                    else if (positionNumber >= 6 && positionNumber <= 8)
+                        return positionNumber == 7 ? "Central Midfielder" : "Defensive Midfielder";
+                    else
+                        return positionNumber == 10 ? "Center Forward" : "Wing Forward";
+                
+                case TeamFormation.Formation_4_2_3_1:
+                    if (positionNumber >= 2 && positionNumber <= 5)
+                        return positionNumber == 2 || positionNumber == 5 ? "Full Back" : "Center Back";
+                    else if (positionNumber == 6 || positionNumber == 7)
+                        return "Defensive Midfielder";
+                    else if (positionNumber >= 8 && positionNumber <= 10)
+                        return positionNumber == 9 ? "Central Attacking Midfielder" : "Wing Midfielder";
+                    else
+                        return "Lone Striker";
+                
+                case TeamFormation.Formation_3_5_2:
+                    if (positionNumber >= 2 && positionNumber <= 4)
+                        return "Center Back";
+                    else if (positionNumber == 5 || positionNumber == 9)
+                        return "Wing Back";
+                    else if (positionNumber >= 6 && positionNumber <= 8)
+                        return positionNumber == 7 ? "Central Midfielder" : "Defensive Midfielder";
+                    else
+                        return "Striker";
+                
+                case TeamFormation.Formation_5_3_2:
+                    if (positionNumber == 2 || positionNumber == 6)
+                        return "Wing Back";
+                    else if (positionNumber >= 3 && positionNumber <= 5)
+                        return "Center Back";
+                    else if (positionNumber >= 7 && positionNumber <= 9)
+                        return positionNumber == 8 ? "Central Midfielder" : "Wide Midfielder";
+                    else
+                        return "Striker";
+                
+                case TeamFormation.Formation_4_1_4_1:
+                    if (positionNumber >= 2 && positionNumber <= 5)
+                        return positionNumber == 2 || positionNumber == 5 ? "Full Back" : "Center Back";
+                    else if (positionNumber == 6)
+                        return "Defensive Midfielder";
+                    else if (positionNumber >= 7 && positionNumber <= 10)
+                        return positionNumber == 8 || positionNumber == 9 ? "Central Midfielder" : "Winger";
+                    else
+                        return "Lone Striker";
+                
+                default:
+                    // Fallback to standard roles
+                    return Role;
+            }
         }
         
         public async Task<(double dx, double dy)> GetMovementDecisionAsync(
@@ -100,8 +197,9 @@ namespace FootballCommentary.GAgents.PlayerAgents
             Position ballPosition)
         {
             string promptTemplate = @"
-You are a {0} (#{1}) for {2}. 
+You are a {0} (#{1}) for {2}, playing as a {18} in a {19} formation.
 Current position: X:{3:F2}, Y:{4:F2}
+Base position in formation: X:{20:F2}, Y:{21:F2}
 Game time: {5}m, Score: {6}
 Ball position: X:{7:F2}, Y:{8:F2}
 Ball possession: {9}
@@ -120,7 +218,7 @@ Opponent positions:
 
 {14}
 
-Based on your role as a {0}, determine the EXTREMELY AGGRESSIVE and HIGH-RISK movement vector (dx, dy) 
+Based on your role as a {18} in a {19} formation, determine the EXTREMELY AGGRESSIVE and HIGH-RISK movement vector (dx, dy) 
 between -0.1 and 0.1. Take major risks to create dramatic goal-scoring opportunities!
 
 {15}
@@ -130,12 +228,34 @@ Respond with JSON only: {{""dx"": value, ""dy"": value}}";
             // Add role-specific guidance
             string roleGuidance = Role switch 
             {
-                "Goalkeeper" => "Though protecting your goal is important, you should take EXTREME risks occasionally! Rush far off your line to intercept through balls, join attacks when your team is pushing forward, and be unpredictable in your positioning to surprise opponents.",
-                "Defender" => "Throw caution to the wind! Push AGGRESSIVELY forward into attack, overlap with your wingers, make daring runs through the center, and don't worry too much about getting back. Take risks with your tackles and intercepts - glory comes to the brave!",
+                "Goalkeeper" => "Your primary role is to protect the goal. When you have possession, distribute the ball QUICKLY and INTELLIGENTLY to a teammate to start an attack. Look for safe, effective passes. Occasionally, if a clear opportunity arises and the team is pushing, you can support play further up, but prioritize safe distribution first.",
+                "Defender" => "Throw caution to the wind! Push AGGRESSIVELY forward into attack, overlap with your wingers, make daring runs through the center. Take risks with your tackles and intercepts - glory comes to the brave! However, be mindful of recovering your defensive shape and protecting your team's half, especially on turnovers.",
                 "Midfielder" => "Be the ultimate playmaker and risk-taker! Drive forward aggressively with the ball, attempt ambitious long-range shots, make daring through passes, and press opponents relentlessly. Your movement should constantly surprise and overwhelm the opposition.",
                 "Forward" => "Play like a superstar striker! Take EXTREME risks to get into scoring positions, make direct runs at defenders, shoot from ANY angle or distance when possible, and constantly look to break behind the defense. Creating spectacular goal-scoring chances is your ONLY priority!",
                 _ => "Play with maximum aggression, take huge risks, and create spectacular moments for your team!"
             };
+            
+            // Add formation role specific guidance
+            string formationRoleGuidance = "";
+            if (!string.IsNullOrEmpty(FormationRole))
+            {
+                formationRoleGuidance = FormationRole switch
+                {
+                    "Full Back" => "As a Full Back, make aggressive overlapping runs, push high up the field, provide width, and deliver crosses. Balance this with timely recovery to your defensive duties in your team's half.",
+                    "Center Back" => "Even as a Center Back, look for opportunities to step into midfield with the ball or join attacks. Your primary duty is to organize the defense and protect your goal area within your team's half.",
+                    "Wing Back" => "As a Wing Back, you should be constantly bombing forward, providing width in attack, and creating overloads. Be prepared to track back quickly to defend your flank in your team's half.",
+                    "Defensive Midfielder" => "Despite being a Defensive Midfielder, make late runs into the box and attempt shots. Your core role is to shield the defense, win the ball back in midfield, and maintain your position in your team's half when defending.",
+                    "Central Midfielder" => "As a Central Midfielder, control the tempo, make box-to-box runs, play risky through passes, and get into shooting positions. Remember to contribute defensively and hold your shape.",
+                    "Wide Midfielder" or "Winger" => "As a wide player, take on defenders 1v1, cut inside for shots, make runs behind the defense, and deliver dangerous crosses. Also, track back to support your full-back.",
+                    "Central Attacking Midfielder" => "As a #10, be the creative spark! Take risks with through balls, shoot from distance, and make late runs into the box. When possession is lost, apply pressure or recover your position.",
+                    "Striker" or "Center Forward" => "As the focal point of attack, constantly look for shooting opportunities, make runs behind defenders, and get into the box for crosses.",
+                    "Lone Striker" => "As a Lone Striker, you must be unpredictable! Drop deep to create, spin in behind, and always be in position to finish attacks.",
+                    "Wing Forward" => "From your wide forward position, cut inside for shots, make diagonal runs behind the defense, and link up with central attackers.",
+                    _ => "Play with intelligence according to your position, but take risks when opportunities arise!"
+                };
+                
+                roleGuidance += "\n\n" + formationRoleGuidance;
+            }
             
             // Add possession-specific instructions
             string possessionGuidance = hasPossession
@@ -187,6 +307,34 @@ Respond with JSON only: {{""dx"": value, ""dy"": value}}";
             string opponentAttackDirection = IsTeamA ? 
                 "from right (X=1) to left (X=0)" : 
                 "from left (X=0) to right (X=1)";
+                
+            // Get formation name for display
+            string formationName = GetFormationDisplayName(CurrentFormation);
+
+            // Conditional tactical nuance for prompt
+            string tacticalNuance = "";
+            bool opponentHasPossession = !string.IsNullOrEmpty(gameState.BallPossession) && 
+                                     ((IsTeamA && gameState.BallPossession.StartsWith("TeamB")) || 
+                                      (!IsTeamA && gameState.BallPossession.StartsWith("TeamA")));
+            bool ballInOwnHalf = (IsTeamA && gameState.Ball.Position.X < 0.5) || 
+                                 (!IsTeamA && gameState.Ball.Position.X > 0.5);
+
+            if (Role == "Midfielder" || Role == "Forward")
+            {
+                if (opponentHasPossession && ballInOwnHalf) {
+                    tacticalNuance = "The opponent has possession in your team's half. Prioritize regaining defensive shape and supporting your defenders. Balance aggression with tactical discipline.";
+                }
+                else if (!opponentHasPossession && ballInOwnHalf && hasPossession) {
+                     tacticalNuance = "Your team has possession deep in your own half. Focus on secure build-up play and creating safe passing options. Extreme forward runs might be too risky now.";
+                }
+                else if (!opponentHasPossession && ballInOwnHalf && !hasPossession) {
+                     tacticalNuance = "The ball is loose in your team's half, or a teammate deep has it. Position yourself to support build-up or transition quickly if possession is won. Avoid overcommitting forward.";
+                }
+            }
+            if (!string.IsNullOrEmpty(tacticalNuance))
+            {
+                possessionGuidance += "\n\nTACTICAL SITUATION: " + tacticalNuance;
+            }
 
             // Format the prompt with player data
             return string.Format(
@@ -208,8 +356,27 @@ Respond with JSON only: {{""dx"": value, ""dy"": value}}";
                 possessionGuidance,
                 roleGuidance,
                 teamAttackDirection,
-                opponentAttackDirection
+                opponentAttackDirection,
+                FormationRole, // {18}
+                formationName,  // {19}
+                BasePosition.X, // {20}
+                BasePosition.Y  // {21}
             );
+        }
+        
+        // Helper to get a readable formation name
+        private string GetFormationDisplayName(TeamFormation formation)
+        {
+            return formation switch
+            {
+                TeamFormation.Formation_4_4_2 => "4-4-2",
+                TeamFormation.Formation_4_3_3 => "4-3-3",
+                TeamFormation.Formation_4_2_3_1 => "4-2-3-1",
+                TeamFormation.Formation_3_5_2 => "3-5-2", 
+                TeamFormation.Formation_5_3_2 => "5-3-2",
+                TeamFormation.Formation_4_1_4_1 => "4-1-4-1",
+                _ => formation.ToString()
+            };
         }
         
         private string DeterminePossessionDescription(FootballCommentary.Core.Models.GameState gameState)

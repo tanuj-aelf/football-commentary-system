@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using FootballCommentary.Core.Abstractions;
 using FootballCommentary.Core.Models;
 using Microsoft.Extensions.Logging;
+using FootballCommentary.GAgents.GameState;
 
 namespace FootballCommentary.GAgents.PlayerAgents
 {
@@ -33,7 +34,7 @@ namespace FootballCommentary.GAgents.PlayerAgents
         
         public bool HasPlayerAgent(string playerId) => _playerAgents.ContainsKey(playerId);
         
-        public void InitializePlayerAgents(FootballCommentary.Core.Models.GameState gameState)
+        public void InitializePlayerAgents(FootballCommentary.Core.Models.GameState gameState, TeamFormationData teamAFormationData, TeamFormationData teamBFormationData)
         {
             _logger.LogInformation("Initializing player agents for game {GameId}", gameState.GameId);
             
@@ -46,6 +47,11 @@ namespace FootballCommentary.GAgents.PlayerAgents
                 int playerNumber = TryParsePlayerId(player.PlayerId);
                 string role = DeterminePlayerRole(playerNumber, true);
                 
+                TeamFormation formation = teamAFormationData?.Formation ?? TeamFormation.Formation_4_4_2;
+                string formationRole = ""; // Will be determined by PlayerAgent constructor
+                Position basePosition = null;
+                teamAFormationData?.BasePositions?.TryGetValue(player.PlayerId, out basePosition);
+                
                 _playerAgents[player.PlayerId] = new PlayerAgent(
                     player.PlayerId,
                     _llmService,
@@ -53,10 +59,13 @@ namespace FootballCommentary.GAgents.PlayerAgents
                     role,
                     playerNumber,
                     isTeamA: true,
-                    teamName: gameState.HomeTeam.Name);
+                    teamName: gameState.HomeTeam.Name,
+                    formation,
+                    formationRole, // Pass empty, let PlayerAgent determine it
+                    basePosition);
                     
-                _logger.LogDebug("Created agent for {Team} player {PlayerId} as {Role}", 
-                    gameState.HomeTeam.Name, player.PlayerId, role);
+                _logger.LogDebug("Created agent for {Team} player {PlayerId} as {Role} in {Formation} formation with base pos: {BaseX}, {BaseY}", 
+                    gameState.HomeTeam.Name, player.PlayerId, role, formation, basePosition?.X, basePosition?.Y);
             }
             
             // Initialize Team B players
@@ -64,6 +73,11 @@ namespace FootballCommentary.GAgents.PlayerAgents
             {
                 int playerNumber = TryParsePlayerId(player.PlayerId);
                 string role = DeterminePlayerRole(playerNumber, false);
+
+                TeamFormation formation = teamBFormationData?.Formation ?? TeamFormation.Formation_4_4_2;
+                string formationRole = ""; // Will be determined by PlayerAgent constructor
+                Position basePosition = null;
+                teamBFormationData?.BasePositions?.TryGetValue(player.PlayerId, out basePosition);
                 
                 _playerAgents[player.PlayerId] = new PlayerAgent(
                     player.PlayerId,
@@ -72,13 +86,53 @@ namespace FootballCommentary.GAgents.PlayerAgents
                     role,
                     playerNumber,
                     isTeamA: false,
-                    teamName: gameState.AwayTeam.Name);
+                    teamName: gameState.AwayTeam.Name,
+                    formation,
+                    formationRole, // Pass empty, let PlayerAgent determine it
+                    basePosition);
                     
-                _logger.LogDebug("Created agent for {Team} player {PlayerId} as {Role}", 
-                    gameState.AwayTeam.Name, player.PlayerId, role);
+                _logger.LogDebug("Created agent for {Team} player {PlayerId} as {Role} in {Formation} formation with base pos: {BaseX}, {BaseY}", 
+                    gameState.AwayTeam.Name, player.PlayerId, role, formation, basePosition?.X, basePosition?.Y);
             }
             
             _logger.LogInformation("Initialized {Count} player agents", _playerAgents.Count);
+        }
+        
+        public void UpdatePlayerFormations(
+            string gameId, 
+            bool isTeamA, 
+            TeamFormation formation, 
+            Dictionary<string, Position> basePositions)
+        {
+            _logger.LogInformation("Updating {TeamType} player formations to {Formation} for game {GameId}", 
+                isTeamA ? "Team A" : "Team B", formation, gameId);
+                
+            foreach (var pair in _playerAgents)
+            {
+                var agent = pair.Value;
+                var playerId = pair.Key;
+                
+                // Only update players for the specified team
+                bool isPlayerTeamA = playerId.StartsWith("TeamA");
+                if (isPlayerTeamA != isTeamA)
+                    continue;
+                    
+                // Get base position for this player if available
+                Position basePosition = null;
+                if (basePositions.TryGetValue(playerId, out var position))
+                {
+                    basePosition = position;
+                }
+                
+                // Determine formation role for this player
+                string formationRole = agent.DetermineFormationRole(formation, agent.PositionNumber);
+                
+                // Update the agent's formation information
+                agent.UpdateFormation(formation, formationRole, basePosition ?? new Position { X = 0.5, Y = 0.5 });
+                
+                _logger.LogDebug("Updated player {PlayerId} to formation {Formation} with role {Role}", 
+                    playerId, formation, formationRole);
+            }
         }
         
         public async Task<Dictionary<string, (double dx, double dy)>> GetPlayerMovementsAsync(
