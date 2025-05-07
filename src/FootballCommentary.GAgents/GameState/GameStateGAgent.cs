@@ -11,6 +11,7 @@ using Orleans.Streams;
 using Orleans.Timers;
 using System.Text;
 using System.Text.RegularExpressions;
+using FootballCommentary.GAgents.PlayerAgents;
 
 namespace FootballCommentary.GAgents.GameState
 {
@@ -58,56 +59,74 @@ namespace FootballCommentary.GAgents.GameState
         private readonly Random _random = new Random();
         private readonly ILLMService _llmService;
         private readonly LLMTactician _llmTactician;
+        private readonly PlayerAgentManager _playerAgentManager;
         private IStreamProvider? _streamProvider;
         private Dictionary<string, IDisposable> _gameSimulationTimers = new Dictionary<string, IDisposable>();
         
         // Game simulation constants
         private const double FIELD_WIDTH = 1.0;
         private const double FIELD_HEIGHT = 1.0;
-        private const double GOAL_WIDTH = 0.2;
-        private const double PLAYER_SPEED = 0.025; // Increased from 0.02
-        private const double BALL_SPEED = 0.04; // Increased from 0.035
+        private const double GOAL_WIDTH = 0.25; // Increased from 0.2 for wider goals
+        private const double PLAYER_SPEED = 0.035; // Increased from 0.03 for even faster player movement
+        private const double BALL_SPEED = 0.06; // Increased from 0.05 for faster ball movement
         private const double GOAL_POST_X_TEAM_A = 0.05;
         private const double GOAL_POST_X_TEAM_B = 0.95;
-        private const double PASSING_DISTANCE = 0.3;
-        private const double SHOOTING_DISTANCE = 0.25; // Increased from 0.20 to allow shots from further out
-        private const double POSITION_RECOVERY_WEIGHT = 0.01; // Reduced from 0.02
-        private const double BALL_ATTRACTION_WEIGHT = 0.05; // Increased from 0.04 to make players more attracted to ball
-        private const double PLAYER_ROLE_ADHERENCE = 0.02; // Reduced from 0.03 to allow more attacking freedom
-        private const double FORMATION_ADHERENCE = 0.01; // Reduced from 0.015 for more dynamic movement
+        private const double PASSING_DISTANCE = 0.4; // Increased from 0.35 for longer passes
+        private const double SHOOTING_DISTANCE = 0.4; // Increased from 0.3 to allow shots from much further out
+        private const double POSITION_RECOVERY_WEIGHT = 0.005; // Reduced from 0.008 for more free movement
+        private const double BALL_ATTRACTION_WEIGHT = 0.07; // Increased from 0.06 to make players more attracted to ball
+        private const double PLAYER_ROLE_ADHERENCE = 0.01; // Reduced from 0.015 to allow players to break position more
+        private const double FORMATION_ADHERENCE = 0.015; // Increased from 0.005 for more dynamic movement
         
         // Field zones for more realistic positioning
         private const double DEFENSE_ZONE = 0.3;
         private const double MIDFIELD_ZONE = 0.6;
         private const double ATTACK_ZONE = 0.7;
-        private const double TEAMMATE_AVOIDANCE_DISTANCE = 0.08;
+        private const double TEAMMATE_AVOIDANCE_DISTANCE = 0.15; // Increased from 0.08 to match MIN_TEAMMATE_DISTANCE
         private const double OPPONENT_AWARENESS_DISTANCE = 0.15;
         
         // List to track recent tackle attempts
         private readonly List<TackleAttempt> _recentTackleAttempts = new();
         
         // Tackle and ball control constants
-        private const double PLAYER_CONTROL_DISTANCE = 0.05;
-        private const double TACKLE_DISTANCE = 0.08;
-        private const double BASE_TACKLE_CHANCE = 0.25; // Reduced from 0.35 to make tackles less successful
+        private const double PLAYER_CONTROL_DISTANCE = 0.07; // Increased from 0.06
+        private const double TACKLE_DISTANCE = 0.12; // Increased from 0.1 for more tackles
+        private const double BASE_TACKLE_CHANCE = 0.15; // Reduced from 0.2 to make tackles even less successful
         
         // Add a new constant for loose ball attraction
-        private const double LOOSE_BALL_ATTRACTION = 0.08; // How strongly players are drawn to a loose ball
+        private const double LOOSE_BALL_ATTRACTION = 0.09; // Decreased from 0.12 to reduce clustering around loose balls
         
         // These constants need to be defined at class level
         private const double GOAL_X_MIN = 0.45;
         private const double GOAL_X_MAX = 0.55;
         
+        // Add this field after the other private fields in the GameStateGAgent class (around line 100)
+        private readonly Dictionary<string, TimeSpan> _latestGameTimes = new Dictionary<string, TimeSpan>();
+        
         public GameStateGAgent(
             ILogger<GameStateGAgent> logger,
             [PersistentState("gameState", "Default")] IPersistentState<GameStateGAgentState> state,
-            ILLMService llmService)
+            ILLMService llmService,
+            ILoggerFactory loggerFactory)
         {
             _logger = logger;
             _state = state;
             _llmService = llmService;
-            _llmTactician = new LLMTactician(
-                logger.CreateLoggerForCategory<LLMTactician>(), 
+            
+            // Create loggers using logger factory
+            var llmTacticianLogger = loggerFactory.CreateLogger<LLMTactician>();
+            var playerAgentLogger = loggerFactory.CreateLogger<PlayerAgent>();
+            var playerAgentManagerLogger = loggerFactory.CreateLogger<PlayerAgentManager>();
+            var requestManagerLogger = loggerFactory.CreateLogger<ParallelLLMRequestManager>();
+            
+            // Initialize LLM tactician
+            _llmTactician = new LLMTactician(llmTacticianLogger, llmService);
+            
+            // Initialize player agent manager
+            _playerAgentManager = new PlayerAgentManager(
+                playerAgentManagerLogger,
+                playerAgentLogger,
+                requestManagerLogger,
                 llmService);
         }
         
@@ -177,6 +196,11 @@ namespace FootballCommentary.GAgents.GameState
             await InitializeTeamFormation(gameId, gameState, true);  // Team A
             await InitializeTeamFormation(gameId, gameState, false); // Team B
             
+            // Initialize player agents
+            _playerAgentManager.InitializePlayerAgents(gameState, 
+                                                 _state.State.TeamAFormations.GetValueOrDefault(gameId), 
+                                                 _state.State.TeamBFormations.GetValueOrDefault(gameId));
+            
             _state.State.Games[gameId] = gameState;
             await _state.WriteStateAsync();
             
@@ -231,6 +255,19 @@ namespace FootballCommentary.GAgents.GameState
                 else
                 {
                     _state.State.TeamBFormations[gameId] = formationData;
+                }
+                
+                // Update player agents with formation information if they exist
+                if (_playerAgentManager.HasPlayerAgent(players.FirstOrDefault()?.PlayerId))
+                {
+                    _logger.LogInformation("Updating player agents with formation information for {Team}", 
+                        isTeamA ? "Team A" : "Team B");
+                    
+                    _playerAgentManager.UpdatePlayerFormations(
+                        gameId, 
+                        isTeamA, 
+                        formation, 
+                        formationData.BasePositions);
                 }
                 
                 string formationName = GetFormationName(formation);
@@ -572,6 +609,10 @@ namespace FootballCommentary.GAgents.GameState
             game.LastUpdateTime = DateTime.UtcNow;
             game.GameStartTime = DateTime.UtcNow;
             
+            // Reset game time tracking to ensure we start from 0
+            game.GameTime = TimeSpan.Zero;
+            _latestGameTimes[gameId] = TimeSpan.Zero;
+            
             // Reinitialize team formations to ensure random and different formations at game start
             _logger.LogInformation("Initializing team formations at game start for {GameId}", gameId);
             await InitializeTeamFormation(gameId, game, true);  // Team A
@@ -580,6 +621,15 @@ namespace FootballCommentary.GAgents.GameState
             // Reset player positions based on the new formations
             ResetPlayerPositions(game, true);  // Team A
             ResetPlayerPositions(game, false); // Team B
+            
+            // Make sure player agents are initialized
+            if (!_playerAgentManager.HasPlayerAgent(game.HomeTeam.Players[0].PlayerId))
+            {
+                _logger.LogInformation("Initializing player agents at game start for {GameId}", gameId);
+                _playerAgentManager.InitializePlayerAgents(game, 
+                                                     _state.State.TeamAFormations.GetValueOrDefault(gameId), 
+                                                     _state.State.TeamBFormations.GetValueOrDefault(gameId));
+            }
             
             await _state.WriteStateAsync();
             
@@ -603,8 +653,18 @@ namespace FootballCommentary.GAgents.GameState
                 throw new KeyNotFoundException($"Game {gameId} not found");
             }
             
+            // Ensure game time is at least 90 minutes when ending
+            if (game.GameTime.TotalMinutes < 90)
+            {
+                game.GameTime = TimeSpan.FromMinutes(90);
+                // Also update the latest game time tracking
+                _latestGameTimes[gameId] = TimeSpan.FromMinutes(90);
+                _logger.LogInformation("Setting final game time to 90 minutes for game {GameId}", gameId);
+            }
+            
             game.Status = GameStatus.Ended;
             game.LastUpdateTime = DateTime.UtcNow;
+            game.FinalGameTime = game.GameTime; // Store the final game time
             
             // Stop game simulation
             if (_gameSimulationTimers.TryGetValue(gameId, out var timer))
@@ -613,13 +673,20 @@ namespace FootballCommentary.GAgents.GameState
                 _gameSimulationTimers.Remove(gameId);
             }
             
+            // Clean up the latest game time tracking
+            _latestGameTimes.Remove(gameId);
+            
             await _state.WriteStateAsync();
+            
+            // Publish final game state update with the correct time
+            await PublishGameStateUpdateAsync(game);
             
             // Publish game end event
             await PublishGameEventAsync(new GameEvent
             {
                 GameId = gameId,
-                EventType = GameEventType.GameEnd
+                EventType = GameEventType.GameEnd,
+                GameTime = game.GameTime // Include the final game time in the event
             });
             
             return game;
@@ -969,12 +1036,44 @@ namespace FootballCommentary.GAgents.GameState
                     return; // Not running or goal scored
                 }
                 
-                // Update game time
+                // Update game time with more precise calculation
                 var realElapsed = DateTime.UtcNow - game.GameStartTime;
-                // Scale real time: 1 real minute = 90 game minutes
-                var scaledMinutes = realElapsed.TotalMinutes * 90;
+                
+                // Scale real time: 1.5 real minutes = 90 game minutes
+                // This ensures we're using the same time scale as the client
+                double scaleFactor = 90 / 1.5; // 90 minutes / 1.5 minutes = 60
+                var scaledMinutes = realElapsed.TotalMinutes * scaleFactor;
+                
                 // Convert to TimeSpan (this will be what's displayed on screen)
-                game.GameTime = TimeSpan.FromMinutes(scaledMinutes);
+                var calculatedGameTime = TimeSpan.FromMinutes(scaledMinutes);
+                
+                // Check if we have a stored latest time for this game
+                if (!_latestGameTimes.TryGetValue(gameId, out var latestTime))
+                {
+                    // First time tracking this game
+                    _latestGameTimes[gameId] = calculatedGameTime;
+                    latestTime = calculatedGameTime;
+                }
+                // Only update the time if the calculated time is greater than our stored latest time
+                else if (calculatedGameTime > latestTime)
+                {
+                    _latestGameTimes[gameId] = calculatedGameTime;
+                    latestTime = calculatedGameTime;
+                }
+                else
+                {
+                    _logger.LogDebug("Calculated time {CalculatedTime} is less than or equal to latest time {LatestTime}, keeping latest time", 
+                        calculatedGameTime, latestTime);
+                }
+                
+                // Always use the latest valid time
+                game.GameTime = latestTime;
+                
+                // Check if it's time to update formations (every 30 seconds of game time)
+                if (game.SimulationStep % 300 == 0) // Every ~30 seconds
+                {
+                    await UpdateTeamFormations(game);
+                }
                 
                 // Randomly decide if we should publish an event
                 bool publishEvent = false;
@@ -1000,8 +1099,11 @@ namespace FootballCommentary.GAgents.GameState
                 game.SimulationStep++;
                 
                 // End game after 90 minutes (game time)
+                // To avoid early termination, ensure we've actually reached 90 minutes
                 if (game.GameTime.TotalMinutes >= 90 && game.Status == GameStatus.InProgress)
                 {
+                    _logger.LogInformation("Game {GameId} reached 90 minutes, ending game. Total real time elapsed: {RealMinutes:F2} minutes", 
+                        gameId, realElapsed.TotalMinutes);
                     await EndGameAsync(gameId);
                 }
             }
@@ -1013,247 +1115,109 @@ namespace FootballCommentary.GAgents.GameState
         
         private async Task MoveAllPlayers(FootballCommentary.Core.Models.GameState game)
         {
-            // Get all players from both teams
-            var homeTeamPlayers = game.HomeTeam.Players;
-            var awayTeamPlayers = game.AwayTeam.Players;
-            var allPlayers = homeTeamPlayers.Concat(awayTeamPlayers).ToList();
-
-            // Store the player with the ball
-            Player? playerWithBall = null;
-            if (!string.IsNullOrEmpty(game.BallPossession))
+            try
             {
-                playerWithBall = allPlayers.FirstOrDefault(p => p.PlayerId == game.BallPossession);
-            }
-
-            // Check if it's time to update formations (every 30 seconds of game time)
-            if (game.SimulationStep % 300 == 0) // Every ~30 seconds
-            {
-                await UpdateTeamFormations(game);
-            }
-            
-            // Check if it's time to get new LLM suggestions
-            // Increase LLM update frequency to every 10 steps
-            bool useLLMSuggestions = game.SimulationStep % 10 == 0; // Changed from 15
-            
-            // Check if it's been enough time since the last LLM call
-            if (useLLMSuggestions)
-            {
-                DateTime now = DateTime.UtcNow;
-                if (_state.State.LastLLMUpdateTimes.TryGetValue(game.GameId, out DateTime lastUpdate))
+                // Check if we should use the new agent-based approach
+                // Get player movement decisions from the player agent manager
+                var playerMovements = await _playerAgentManager.GetPlayerMovementsAsync(game);
+                
+                // Process special case for goalkeeper separately
+                var homeTeamPlayers = game.HomeTeam.Players;
+                var awayTeamPlayers = game.AwayTeam.Players;
+                var allPlayers = homeTeamPlayers.Concat(awayTeamPlayers).ToList();
+                
+                // Find the player with the ball
+                Player? playerWithBall = null;
+                if (!string.IsNullOrEmpty(game.BallPossession))
                 {
-                    // Only allow LLM calls if at least 1 second has passed
-                    if ((now - lastUpdate).TotalSeconds < 1)
+                    playerWithBall = allPlayers.FirstOrDefault(p => p.PlayerId == game.BallPossession);
+                }
+                
+                // Process movements for all players
+                foreach (var player in allPlayers)
+                {
+                    // Special case for goalkeepers
+                    bool isGoalkeeper = player.PlayerId.EndsWith("_0"); // ID format: TeamX_0 for goalkeepers
+                    if (isGoalkeeper)
                     {
-                        _logger.LogDebug("Skipping LLM call as only {Seconds} seconds have passed since last call", 
-                            (now - lastUpdate).TotalSeconds);
-                        useLLMSuggestions = false;
+                        MoveGoalkeeper(game, player, playerWithBall);
+                        continue;
                     }
-                }
-                
-                if (useLLMSuggestions)
-                {
-                    _state.State.LastLLMUpdateTimes[game.GameId] = now;
-                }
-            }
-            
-            // LLM movement suggestions for both teams
-            Dictionary<string, (double dx, double dy)> teamAMovementSuggestions = new Dictionary<string, (double dx, double dy)>();
-            Dictionary<string, (double dx, double dy)> teamBMovementSuggestions = new Dictionary<string, (double dx, double dy)>();
-            
-            // Get LLM movement suggestions if it's the right step
-            if (useLLMSuggestions)
-            {
-                // Check if team A has possession
-                bool isTeamAInPossession = !string.IsNullOrEmpty(game.BallPossession) && game.BallPossession.StartsWith("TeamA");
-                bool isTeamBInPossession = !string.IsNullOrEmpty(game.BallPossession) && game.BallPossession.StartsWith("TeamB");
-                
-                // Get movement suggestions for both teams
-                try
-                {
-                    // Run these in parallel to speed up processing
-                    var teamATasks = _llmTactician.GetMovementSuggestionsAsync(
-                        game, 
-                        homeTeamPlayers,
-                        true,
-                        isTeamAInPossession);
+                    
+                    // Special handling for player with ball
+                    if (player.PlayerId == game.BallPossession)
+                    {
+                        // If we have an agent-based movement for the ball possessor, use that with some adjustments
+                        if (playerMovements.TryGetValue(player.PlayerId, out var movement))
+                        {
+                            // Apply the agent's movement decision with some gameplay adjustments
+                            double dx = movement.dx;
+                            double dy = movement.dy;
+                            
+                            // Apply movement with boundary checking
+                            player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+                            player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
+                            
+                            // Update ball position to follow the player
+                            game.Ball.Position = player.Position;
+                            game.Ball.VelocityX = 0;
+                            game.Ball.VelocityY = 0;
+                        }
+                        else
+                        {
+                            // Fall back to default ball possessor movement
+                            MoveBallPossessor(game, player);
+                        }
+                        continue;
+                    }
+                    
+                    // Apply agent-based movement or fall back to rule-based
+                    if (playerMovements.TryGetValue(player.PlayerId, out var agentMovement))
+                    {
+                        _logger.LogDebug("Applying agent-based movement for player {PlayerId}: ({DX},{DY})", 
+                            player.PlayerId, agentMovement.dx, agentMovement.dy);
+                            
+                        // Apply the movement with some additional game dynamics
+                        double dx = agentMovement.dx;
+                        double dy = agentMovement.dy;
                         
-                    var teamBTasks = _llmTactician.GetMovementSuggestionsAsync(
-                        game, 
-                        awayTeamPlayers,
-                        false,
-                        isTeamBInPossession);
-                    
-                    // Wait for both to complete
-                    await Task.WhenAll(teamATasks, teamBTasks);
-                    
-                    // Get results
-                    teamAMovementSuggestions = await teamATasks;
-                    teamBMovementSuggestions = await teamBTasks;
+                        // Apply teammate avoidance to prevent crowding
+                        AvoidTeammates(game, player, ref dx, ref dy, player.PlayerId.StartsWith("TeamA"));
                         
-                    _logger.LogInformation("LLM movement suggestions received for both teams. Step: {Step}", game.SimulationStep);
-                    
-                    // Cache these movement suggestions in the formation data
-                    if (_state.State.TeamAFormations.TryGetValue(game.GameId, out var teamAFormation))
-                    {
-                        teamAFormation.CachedMovements = new Dictionary<string, (double dx, double dy)>(teamAMovementSuggestions);
-                        teamAFormation.LastUpdateTime = DateTime.UtcNow;
-                    }
-                    
-                    if (_state.State.TeamBFormations.TryGetValue(game.GameId, out var teamBFormation))
-                    {
-                        teamBFormation.CachedMovements = new Dictionary<string, (double dx, double dy)>(teamBMovementSuggestions);
-                        teamBFormation.LastUpdateTime = DateTime.UtcNow;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error getting LLM movement suggestions: {Message}", ex.Message);
-                }
-            }
-            else
-            {
-                // If not using LLM directly, generate more natural variations of cached suggestions
-                if (_state.State.TeamAFormations.TryGetValue(game.GameId, out var teamAFormation) && 
-                    teamAFormation.CachedMovements.Any())
-                {
-                    // Add variations to cached movements
-                    foreach (var (playerId, movement) in teamAFormation.CachedMovements)
-                    {
-                        // More natural movement variation - scale with game step for continuous motion
-                        double timeVariation = Math.Sin(game.SimulationStep * 0.1) * 0.007;
-                        double dx = movement.dx + timeVariation + (_random.NextDouble() - 0.5) * 0.015;
-                        double dy = movement.dy + timeVariation + (_random.NextDouble() - 0.5) * 0.015;
-                        
-                        // Clamp values
-                        dx = Math.Clamp(dx, -0.1, 0.1);
-                        dy = Math.Clamp(dy, -0.1, 0.1);
-                        
-                        teamAMovementSuggestions[playerId] = (dx, dy);
-                    }
-                }
-                else
-                {
-                    // If we don't have any cached movements, create natural idle movements for all players
-                    foreach (var player in homeTeamPlayers)
-                    {
-                        double timeVariation = Math.Sin(game.SimulationStep * 0.1 + _random.NextDouble() * 10) * 0.01;
-                        double dx = timeVariation + (_random.NextDouble() - 0.5) * 0.01;
-                        double dy = timeVariation + (_random.NextDouble() - 0.5) * 0.01;
-                        teamAMovementSuggestions[player.PlayerId] = (dx, dy);
-                    }
-                }
-                
-                if (_state.State.TeamBFormations.TryGetValue(game.GameId, out var teamBFormation) && 
-                    teamBFormation.CachedMovements.Any())
-                {
-                    // Add variations to cached movements
-                    foreach (var (playerId, movement) in teamBFormation.CachedMovements)
-                    {
-                        // More natural movement variation - scale with game step for continuous motion
-                        double timeVariation = Math.Sin(game.SimulationStep * 0.1 + Math.PI) * 0.007; // Offset for team B
-                        double dx = movement.dx + timeVariation + (_random.NextDouble() - 0.5) * 0.015;
-                        double dy = movement.dy + timeVariation + (_random.NextDouble() - 0.5) * 0.015;
-                        
-                        // Clamp values
-                        dx = Math.Clamp(dx, -0.1, 0.1);
-                        dy = Math.Clamp(dy, -0.1, 0.1);
-                        
-                        teamBMovementSuggestions[playerId] = (dx, dy);
-                    }
-                }
-                else
-                {
-                    // If we don't have any cached movements, create natural idle movements for all players
-                    foreach (var player in awayTeamPlayers)
-                    {
-                        double timeVariation = Math.Sin(game.SimulationStep * 0.1 + _random.NextDouble() * 10 + Math.PI) * 0.01;
-                        double dx = timeVariation + (_random.NextDouble() - 0.5) * 0.01;
-                        double dy = timeVariation + (_random.NextDouble() - 0.5) * 0.01;
-                        teamBMovementSuggestions[player.PlayerId] = (dx, dy);
-                    }
-                }
-            }
-
-            // Move each player based on their team's tactical objectives
-            foreach (var player in allPlayers)
-            {
-                // Special case for goalkeepers (player #1 on each team)
-                bool isGoalkeeper = player.PlayerId.EndsWith("_0"); // ID format: TeamX_0 for goalkeepers
-                
-                if (isGoalkeeper)
-                {
-                    MoveGoalkeeper(game, player, playerWithBall);
-                    continue;
-                }
-                
-                // Special handling for player with ball - prioritize forward movement
-                if (player.PlayerId == game.BallPossession)
-                {
-                    MoveBallPossessor(game, player);
-                    continue;
-                }
-                
-                bool isTeamA = player.PlayerId.StartsWith("TeamA");
-                bool isTeamInPossession = !string.IsNullOrEmpty(game.BallPossession) && 
-                    game.BallPossession.StartsWith(isTeamA ? "TeamA" : "TeamB");
-                
-                // Get player number for role assignment, handling potential parsing errors
-                int playerNumber = 0; // Default to 0 if parsing fails
-                try
-                {
-                    string playerIndexStr = player.PlayerId.Split('_')[1].Replace("Player", "");
-                    playerNumber = int.Parse(playerIndexStr) + 1; // Add 1 to adjust for 1-based roles
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to parse player number from PlayerId: {PlayerId}", player.PlayerId);
-                    // Optionally handle the error, e.g., skip this player or assign a default role
-                    continue; // Skip moving this player if ID is invalid
-                }
-                
-                // Calculate player's base position based on role
-                Position basePosition = GetBasePositionForRole(playerNumber, isTeamA, game.GameId);
-                
-                // Check if we have LLM suggestions for this player
-                var movementSuggestions = isTeamA ? teamAMovementSuggestions : teamBMovementSuggestions;
-                if (movementSuggestions.TryGetValue(player.PlayerId, out var suggestion))
-                {
-                    // Apply LLM-suggested movement with some adjustments for game logic
-                    double dx = suggestion.dx;
-                    double dy = suggestion.dy;
-                    
-                    // Add adherence to base position but with a weaker pull
-                    dx += (basePosition.X - player.Position.X) * POSITION_RECOVERY_WEIGHT * 0.4;
-                    dy += (basePosition.Y - player.Position.Y) * POSITION_RECOVERY_WEIGHT * 0.4;
-                    
-                    // Continuous fluctuation for more natural movement
-                    double cyclicVariation = Math.Sin(game.SimulationStep * 0.08 + playerNumber * 0.5) * 0.004;
-                    dx += cyclicVariation;
-                    dy += cyclicVariation * (_random.NextDouble() > 0.5 ? 1 : -1);
-                    
-                    // Avoid teammates crowding
-                    AvoidTeammates(game, player, ref dx, ref dy, isTeamA);
-                    
-                    // Apply movement with boundary checking
-                    player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
-                    player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
-                    
-                    _logger.LogDebug("Applied AI movement for player {PlayerId}: dx={dx}, dy={dy}", 
-                        player.PlayerId, dx, dy);
-                }
-                else
-                {
-                    // Fall back to rule-based movement logic
-                    // Apply different movement logic based on whether team is in possession
-                    if (isTeamInPossession)
-                    {
-                        MovePlayerWhenTeamHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                        // Apply the finalized movement with boundary checking
+                        player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+                        player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
                     }
                     else
                     {
-                        MovePlayerWhenOpponentHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                        // Fall back to rule-based behavior if no agent movement available
+                        bool isTeamA = player.PlayerId.StartsWith("TeamA");
+                        bool isTeamInPossession = !string.IsNullOrEmpty(game.BallPossession) && 
+                            game.BallPossession.StartsWith(isTeamA ? "TeamA" : "TeamB");
+                            
+                        int? playerNumber = TryParsePlayerId(player.PlayerId);
+                        if (!playerNumber.HasValue) continue;
+                            
+                        // Get player's base position from formation
+                        Position basePosition = GetBasePositionForRole(playerNumber.Value + 1, isTeamA, game.GameId);
+                        
+                        // Apply rule-based movement based on possession
+                        if (isTeamInPossession)
+                        {
+                            MovePlayerWhenTeamHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                        }
+                        else
+                        {
+                            MovePlayerWhenOpponentHasPossession(game, player, playerWithBall, basePosition, isTeamA);
+                        }
                     }
                 }
+                
+                _logger.LogDebug("Moved {Count} players using agent-based approach", playerMovements.Count);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in MoveAllPlayers: {Message}", ex.Message);
             }
         }
         
@@ -1269,7 +1233,7 @@ namespace FootballCommentary.GAgents.GameState
             Position ballPos = game.Ball?.Position ?? new Position { X = 0.5, Y = 0.5 };
             
             // Define the maximum distance goalkeeper can stray from goal
-            double maxDistance = 0.15; // Reduced from default (typically 0.2) to keep goalkeepers closer to the goal line
+            double maxDistance = 0.18; // Increased from 0.15 to make goalkeepers wander more
             
             // Determine if ball is in goalkeeper's half
             bool ballInOwnHalf = (isTeamA && ballPos.X < 0.5) || (!isTeamA && ballPos.X > 0.5);
@@ -1278,39 +1242,39 @@ namespace FootballCommentary.GAgents.GameState
             {
                 // Ball is in goalkeeper's half - be more aggressive
                 double targetX = isTeamA ? 
-                    Math.Min(goalPostX + 0.12, ballPos.X - 0.1) : // For Team A, move ahead but stay back from ball
-                    Math.Max(goalPostX - 0.12, ballPos.X + 0.1);  // For Team B, move ahead but stay back from ball
+                    Math.Min(goalPostX + 0.15, ballPos.X - 0.1) : // Increased from 0.12 - move further from goal
+                    Math.Max(goalPostX - 0.15, ballPos.X + 0.1);  // Increased from 0.12 - move further from goal
                     
                 // Move toward the target X
-                dx = (targetX - goalkeeper.Position.X) * 0.15; // Reduced from typical 0.2 for slower goalkeeper reactions
+                dx = (targetX - goalkeeper.Position.X) * 0.12; // Reduced from typical 0.15 for slower goalkeeper reactions
             }
             else
             {
                 // Ball is in opponent's half - stay close to goal line
-                double targetX = isTeamA ? goalPostX + 0.05 : goalPostX - 0.05; // Stay near goal line
+                double targetX = isTeamA ? goalPostX + 0.06 : goalPostX - 0.06; // Increased from 0.05 - stay further from goal line
                 
                 // Move toward the target X
-                dx = (targetX - goalkeeper.Position.X) * 0.1; // Reduced from typical 0.15 for slower goalkeeper positioning
+                dx = (targetX - goalkeeper.Position.X) * 0.08; // Reduced from 0.1 for even slower goalkeeper positioning
             }
             
-            // Y movement - follow ball's Y position with some lag
+            // Y movement - follow ball's Y position with significant lag
             double targetY = ballPos.Y;
             
-            // Add a bit of randomization to goalkeeper positioning - increased randomness
-            targetY += (_random.NextDouble() - 0.5) * 0.08; // Increased from typical 0.05 for less perfect positioning
+            // Add more randomization to goalkeeper positioning - increased randomness 
+            targetY += (_random.NextDouble() - 0.5) * 0.12; // Increased from 0.08 for less perfect positioning
             
             // Move toward target Y
-            dy = (targetY - goalkeeper.Position.Y) * 0.15; // Reduced from typical 0.25 for slower reactions
+            dy = (targetY - goalkeeper.Position.Y) * 0.12; // Reduced from 0.15 for slower reactions
             
             // Apply maximum movement speeds
-            dx = Math.Clamp(dx, -PLAYER_SPEED * 0.8, PLAYER_SPEED * 0.8); // Slower than typical players
-            dy = Math.Clamp(dy, -PLAYER_SPEED * 0.8, PLAYER_SPEED * 0.8); // Slower than typical players
+            dx = Math.Clamp(dx, -PLAYER_SPEED * 0.7, PLAYER_SPEED * 0.7); // Slower than typical players
+            dy = Math.Clamp(dy, -PLAYER_SPEED * 0.7, PLAYER_SPEED * 0.7); // Slower than typical players
             
             // Constrain goalkeeper to stay near goal
             goalkeeper.Position.X = Math.Clamp(goalkeeper.Position.X + dx, 
                 isTeamA ? goalPostX : goalPostX - maxDistance, 
                 isTeamA ? goalPostX + maxDistance : goalPostX);
-            goalkeeper.Position.Y = Math.Clamp(goalkeeper.Position.Y + dy, 0.3, 0.7);
+            goalkeeper.Position.Y = Math.Clamp(goalkeeper.Position.Y + dy, 0.25, 0.75); // Wider range (was 0.3-0.7)
             
             // Goalkeeper diving logic - if ball is very close to goal and moving toward it
             bool ballMovingTowardGoal = false;
@@ -1325,8 +1289,8 @@ namespace FootballCommentary.GAgents.GameState
                 Math.Pow(goalkeeper.Position.X - ballPos.X, 2) + 
                 Math.Pow(goalkeeper.Position.Y - ballPos.Y, 2));
             
-            // Reduced diving chance from 0.4 to 0.25 for less perfect saves
-            if (ballMovingTowardGoal && distanceToBall < 0.1 && _random.NextDouble() < 0.25)
+            // Reduced diving chance from 0.25 to 0.2 for less perfect saves
+            if (ballMovingTowardGoal && distanceToBall < 0.1 && _random.NextDouble() < 0.2)
             {
                 // Calculate direction to the ball for diving
                 double diveDx = ballPos.X - goalkeeper.Position.X;
@@ -1336,16 +1300,16 @@ namespace FootballCommentary.GAgents.GameState
                 if (diveDist > 0)
                 {
                     // Normalize and apply a dive in the ball's direction
-                    goalkeeper.Position.X += (diveDx / diveDist) * PLAYER_SPEED * 2;
-                    goalkeeper.Position.Y += (diveDy / diveDist) * PLAYER_SPEED * 2;
+                    goalkeeper.Position.X += (diveDx / diveDist) * PLAYER_SPEED * 1.8; // Reduced from 2.0 
+                    goalkeeper.Position.Y += (diveDy / diveDist) * PLAYER_SPEED * 1.8; // Reduced from 2.0
                     
                     // Check if goalkeeper catches the ball
                     distanceToBall = Math.Sqrt(
                         Math.Pow(goalkeeper.Position.X - ballPos.X, 2) + 
                         Math.Pow(goalkeeper.Position.Y - ballPos.Y, 2));
                     
-                    // Reduced catch chance from typical 0.7 to 0.4 for more goals
-                    if (distanceToBall < 0.05 && _random.NextDouble() < 0.4)
+                    // Reduced catch chance from 0.4 to 0.25 for more goals
+                    if (distanceToBall < 0.05 && _random.NextDouble() < 0.25)
                     {
                         // Goalkeeper catches the ball
                         game.BallPossession = goalkeeper.PlayerId;
@@ -1394,12 +1358,26 @@ namespace FootballCommentary.GAgents.GameState
                 {
                     _logger.LogInformation("Team A formation changed to {Formation}", teamAFormation);
                     UpdateTeamBasePositions(game, true, teamAData);
+                    
+                    // Update player agents with new formation information
+                    _playerAgentManager.UpdatePlayerFormations(
+                        game.GameId,
+                        true, // isTeamA
+                        teamAFormation,
+                        teamAData.BasePositions);
                 }
                 
                 if (teamBFormationChanged)
                 {
                     _logger.LogInformation("Team B formation changed to {Formation}", teamBFormation);
                     UpdateTeamBasePositions(game, false, teamBData);
+                    
+                    // Update player agents with new formation information
+                    _playerAgentManager.UpdatePlayerFormations(
+                        game.GameId,
+                        false, // isTeamA
+                        teamBFormation,
+                        teamBData.BasePositions);
                 }
                 
                 await _state.WriteStateAsync();
@@ -1462,7 +1440,12 @@ namespace FootballCommentary.GAgents.GameState
             double playerX = player.Position.X;
             bool inDefensiveHalf = (isTeamA && playerX < 0.5) || (!isTeamA && playerX > 0.5);
             bool inOffensiveHalf = !inDefensiveHalf;
-            bool inAttackingThird = (isTeamA && playerX > 0.7) || (!isTeamA && playerX < 0.3);
+            
+            // Check if the ball is in the team's own defensive half
+            bool ballInOwnDefensiveHalf = (isTeamA && game.Ball.Position.X < 0.5) || (!isTeamA && game.Ball.Position.X > 0.5);
+            
+            // Check if player is far into the attacking half
+            bool deepInAttackingHalf = (isTeamA && playerX > 0.75) || (!isTeamA && playerX < 0.25);
             
             // Variables for movement calculation
             double dx = 0;
@@ -1474,6 +1457,69 @@ namespace FootballCommentary.GAgents.GameState
                                     (isTeamA && possessorId.StartsWith("TeamA")) || 
                                     (!isTeamA && possessorId.StartsWith("TeamB"));
             
+            // NEW: Count players in attacking half to implement team shape discipline
+            int teamPlayersInAttackingHalf = 0;
+            var teamPlayers = isTeamA ? game.HomeTeam.Players : game.AwayTeam.Players;
+            foreach (var teammate in teamPlayers)
+            {
+                bool teammateInAttackingHalf = (isTeamA && teammate.Position.X > 0.5) || 
+                                  (!isTeamA && teammate.Position.X < 0.5);
+                if (teammateInAttackingHalf)
+                {
+                    teamPlayersInAttackingHalf++;
+                }
+            }
+            
+            // NEW: Define strict maximum forward positions by role
+            double maxForwardPosition;
+            if (isDefender) {
+                maxForwardPosition = isTeamA ? 0.55 : 0.45; // Defenders barely cross midfield
+                // Even stricter if too many players forward already
+                if (teamPlayersInAttackingHalf > 5) {
+                    maxForwardPosition = isTeamA ? 0.45 : 0.55; // Keep defenders in own half
+                }
+            } else if (isMidfielder) {
+                // Holding midfielders (6, 8) are more restricted than attacking midfielders (7, 9)
+                if (playerNumber == 6 || playerNumber == 8) {
+                    maxForwardPosition = isTeamA ? 0.65 : 0.35; // Holding midfielders
+                    if (teamPlayersInAttackingHalf > 5) {
+                        maxForwardPosition = isTeamA ? 0.55 : 0.45; // More restrictive when too many forward
+                    }
+                } else {
+                    maxForwardPosition = isTeamA ? 0.8 : 0.2; // Attacking midfielders
+                    if (teamPlayersInAttackingHalf > 6) {
+                        maxForwardPosition = isTeamA ? 0.7 : 0.3; // Still restrict if too many forward
+                    }
+                }
+            } else {
+                // Forwards
+                maxForwardPosition = isTeamA ? 0.95 : 0.05; // Can go all the way
+            }
+            
+            // NEW: Enforce position discipline FIRST before any other movement calculations
+            // If player is too far forward beyond allowed position, strong retreat force
+            if ((isTeamA && playerX > maxForwardPosition) || (!isTeamA && playerX < maxForwardPosition)) {
+                // Calculate retreat target slightly behind max position
+                double retreatTargetX = isTeamA ? maxForwardPosition - 0.05 : maxForwardPosition + 0.05;
+                
+                // Very strong retreat force - overrides other movement incentives
+                double retreatForce = 0.05; // Strong absolute force value
+                dx = isTeamA ? -retreatForce : retreatForce;
+                
+                // Also pull toward base position Y to maintain team shape
+                dy = (basePosition.Y - player.Position.Y) * 0.03;
+                
+                _logger.LogDebug("ENFORCING RETREAT: Player {PlayerId} ({Role}) forced to retreat from {Position} to max allowed {MaxPos}",
+                    player.PlayerId, isDefender ? "Defender" : isMidfielder ? "Midfielder" : "Forward", playerX, maxForwardPosition);
+                
+                // Apply movement with boundary checking
+                player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+                player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
+                
+                // Skip other movement calculations for this player since retreat takes priority
+                return;
+            }
+            
             // If ball possessor exists and is from same team
             if (playerWithBall != null && teamHasPossession)
             {
@@ -1482,158 +1528,112 @@ namespace FootballCommentary.GAgents.GameState
                 // Movement behaviors based on player role and field position
                 if (isDefender)
                 {
-                    if (inDefensiveHalf)
-                    {
-                        // Defenders staying back in defensive half
-                        dx += forwardDirection * PLAYER_SPEED * 0.3;
+                    // Defenders should generally stay back, regardless of possession
+                    double defensivePositionX = isTeamA ? 0.25 : 0.75; // More conservative defensive position
+                    
+                    // Stronger formation adherence for defenders
+                    double formationAdherenceMultiplier = 3.0; // Increased from 2.5
+                    
+                    // Different behavior based on ball position
+                    if (ballInOwnDefensiveHalf) {
+                        // Ball in own half - defenders stay deep and provide cover
+                        dx += (defensivePositionX - player.Position.X) * (FORMATION_ADHERENCE * formationAdherenceMultiplier * 1.5);
+                        dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * formationAdherenceMultiplier);
+                    } else {
+                        // Ball in opponent half - maintain defensive line at or near midfield
+                        double defensiveLineX = isTeamA ? 0.45 : 0.55; // Just behind midfield
                         
-                        // Maintain spacing around base position
-                        dx += (basePosition.X - player.Position.X) * POSITION_RECOVERY_WEIGHT * 2.0;
-                        dy += (basePosition.Y - player.Position.Y) * POSITION_RECOVERY_WEIGHT * 1.5;
-                    }
-                    else
-                    {
-                        // Defenders move forward cautiously in offensive half
-                        dx += forwardDirection * PLAYER_SPEED * 0.5;
-                        
-                        // Make supporting runs, but don't go too far forward
-                        if (playerWithBall != null && distToBallPossessor > 0.2)
-                        {
-                            dx += (playerWithBall.Position.X - player.Position.X) * 0.02;
-                            dy += (playerWithBall.Position.Y - player.Position.Y) * 0.03;
-                        }
+                        // Extremely strong pull to defensive line
+                        dx += (defensiveLineX - player.Position.X) * (FORMATION_ADHERENCE * formationAdherenceMultiplier * 2.0);
+                        dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * formationAdherenceMultiplier);
                     }
                 }
                 else if (isMidfielder)
                 {
-                    if (inDefensiveHalf)
+                    // Midfielders: More balanced between attack and defense
+                    // Differentiate between holding midfielders (6, 8) and attacking midfielders (7, 9)
+                    bool isHoldingMidfielder = (playerNumber == 6 || playerNumber == 8);
+                    
+                    if (ballInOwnDefensiveHalf)
                     {
-                        // Midfielders move forward in defensive half to support attack
-                        dx += forwardDirection * PLAYER_SPEED * 0.7; // Increased from 0.6
-                        
-                        // Get a bit closer to ball possessor for support
-                        if (playerWithBall != null && distToBallPossessor > 0.2)
-                        {
-                            dx += (playerWithBall.Position.X - player.Position.X) * 0.03;
-                            dy += (playerWithBall.Position.Y - player.Position.Y) * 0.03;
+                        // When ball is in own half, midfielders provide closer support
+                        // Holding midfielders stay deeper
+                        if (isHoldingMidfielder) {
+                            double supportPositionX = isTeamA ? 0.35 : 0.65; // Deeper support position
+                            dx += (supportPositionX - player.Position.X) * (FORMATION_ADHERENCE * 3.0);
+                            dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.0);
+                        } else {
+                            // Attacking midfielders provide support but can be slightly higher
+                            double supportPositionX = isTeamA ? 0.45 : 0.55; // Higher support position
+                            dx += (supportPositionX - player.Position.X) * (FORMATION_ADHERENCE * 2.5);
+                            dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.5);
+                            
+                            // Move toward ball possessor for support
+                            if (distToBallPossessor > 0.15) {
+                                dx += (playerWithBall.Position.X - player.Position.X) * 0.02;
+                                dy += (playerWithBall.Position.Y - player.Position.Y) * 0.03;
+                            }
                         }
                     }
-                    else
+                    else // Ball in opponent's half
                     {
-                        // Midfielders make more aggressive forward runs in offensive half
-                        dx += forwardDirection * PLAYER_SPEED * 0.9; // Increased from 0.7
-                        
-                        // Make supporting runs, creating passing options
-                        if (playerWithBall != null)
-                        {
-                            // Create passing lanes and move into space
-                            // Make runs into goal-scoring positions
-                            if (isTeamA)
-                            {
-                                // Team A: Try to get to the right side for attack
-                                bool isAheadOfBall = player.Position.X > playerWithBall.Position.X;
-                                if (isAheadOfBall)
-                                {
-                                    // If already ahead, make runs toward goal
-                                    dx += PLAYER_SPEED * 0.5; // More aggressive forward movement
-                                    
-                                    // Move toward center or goal area
-                                    if (player.Position.Y < 0.4 || player.Position.Y > 0.6)
-                                    {
-                                        // If on the wings, cut inside
-                                        dy += (0.5 - player.Position.Y) * 0.04;
-                                    }
-                                }
-                                else
-                                {
-                                    // If behind, try to get ahead for receiving passes
-                                    dx += PLAYER_SPEED * 0.8; // More aggressive forward movement
-                                }
-                            }
-                            else
-                            {
-                                // Team B: Try to get to the left side for attack
-                                bool isAheadOfBall = player.Position.X < playerWithBall.Position.X;
-                                if (isAheadOfBall)
-                                {
-                                    // If already ahead, make runs toward goal
-                                    dx -= PLAYER_SPEED * 0.5; // More aggressive forward movement
-                                    
-                                    // Move toward center or goal area
-                                    if (player.Position.Y < 0.4 || player.Position.Y > 0.6)
-                                    {
-                                        // If on the wings, cut inside
-                                        dy += (0.5 - player.Position.Y) * 0.04;
-                                    }
-                                }
-                                else
-                                {
-                                    // If behind, try to get ahead for receiving passes
-                                    dx -= PLAYER_SPEED * 0.8; // More aggressive forward movement
-                                }
-                            }
+                        // Check if we already have too many players in attacking half
+                        if (teamPlayersInAttackingHalf > 6 && isHoldingMidfielder) {
+                            // One holding midfielder should always stay back for balance
+                            double balancePositionX = isTeamA ? 0.45 : 0.55; // Just behind midfield
+                            dx += (balancePositionX - player.Position.X) * (FORMATION_ADHERENCE * 3.0);
+                            dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.0);
+                            
+                            _logger.LogDebug("Holding midfielder {PlayerId} maintaining balance as too many players forward", player.PlayerId);
+                        } else {
+                            // Midfielder can move forward with more freedom, but still with position discipline
+                            double forwardPositionX = isTeamA ? 
+                                Math.Min(playerWithBall.Position.X + 0.1, maxForwardPosition) : 
+                                Math.Max(playerWithBall.Position.X - 0.1, maxForwardPosition);
+                            
+                            // More moderate forward movement to maintain balance
+                            dx += (forwardPositionX - player.Position.X) * (FORMATION_ADHERENCE * 1.5);
+                            // Keep width position based on role
+                            dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.0);
                         }
                     }
                 }
                 else if (isForward)
                 {
-                    // Forwards make more aggressive runs
-                    if (inOffensiveHalf)
+                    // Forwards: Most aggressive attacking movement
+                    if (ballInOwnDefensiveHalf)
                     {
-                        // Forwards make aggressive runs in final third
-                        dx += forwardDirection * PLAYER_SPEED * 1.2; // Increased from 0.9 - much more aggressive
-                        
-                        // If in the attacking third, make runs into the box
-                        if (inAttackingThird)
-                        {
-                            // In attacking third, make runs toward goal
-                            double goalY = 0.5; // Center of goal
-                            
-                            // Move toward a position conducive to scoring
-                            double goalPostX = isTeamA ? 0.95 : 0.05; // Goal post position
-                            
-                            // Make more runs into the box
-                            dx += (goalPostX - player.Position.X) * 0.06; // Increased from 0.04
-                            dy += (goalY - player.Position.Y) * 0.05; // Increased from 0.03
-                            
-                            // Make runs behind defenders
-                            if (_random.NextDouble() < 0.2) // 20% chance to make a run
-                            {
-                                // Make a run in a random direction
-                                dy += (_random.NextDouble() - 0.5) * 0.1;
-                            }
-                        }
-                        else
-                        {
-                            // Not in attacking third yet, move forward aggressively
-                            if (playerWithBall != null)
-                            {
-                                // Get ahead of the ball to create passing options
-                                if ((isTeamA && player.Position.X <= playerWithBall.Position.X) ||
-                                    (!isTeamA && player.Position.X >= playerWithBall.Position.X))
-                                {
-                                    // Move forward to get ahead of the ball
-                                    dx += forwardDirection * PLAYER_SPEED * 1.3; // Very aggressive forward movement
-                                }
-                                else
-                                {
-                                    // Already ahead, make runs and find space
-                                    double lateralMovement = (_random.NextDouble() - 0.5) * 0.1;
-                                    dy += lateralMovement;
-                                }
-                            }
-                        }
+                        // If ball is in own half, forwards drop deeper to provide options
+                        double supportPositionX = isTeamA ? 0.5 : 0.5; // At midfield line
+                        dx += (supportPositionX - player.Position.X) * (FORMATION_ADHERENCE * 1.5);
+                        dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.2);
                     }
-                    else
+                    else // Ball in opponent's half
                     {
-                        // Forwards in defensive half should move forward quickly
-                        dx += forwardDirection * PLAYER_SPEED * 1.1; // Aggressive movement back to offensive position
+                        // Aggressive attacking runs, but still maintain some structure
                         
-                        // Also prioritize returning to base position in Y axis
-                        dy += (basePosition.Y - player.Position.Y) * POSITION_RECOVERY_WEIGHT * 1.2;
+                        // Stagger forwards - not all forwards should push highest line
+                        if (playerNumber == 10) { // First forward stays slightly deeper
+                            double forwardPositionX = isTeamA ? 0.8 : 0.2; 
+                            dx += (forwardPositionX - player.Position.X) * (FORMATION_ADHERENCE * 1.2);
+                        } else { // Second forward can push highest line
+                            double forwardPositionX = isTeamA ? 0.9 : 0.1;
+                            dx += (forwardPositionX - player.Position.X) * (FORMATION_ADHERENCE * 1.0);
+                        }
+                        
+                        // Width based on base position
+                        dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 0.8);
+                        
+                        // Add some randomness for unpredictable forward runs
+                        if (_random.NextDouble() < 0.1) {
+                            dy += (_random.NextDouble() - 0.5) * 0.02;
+                        }
                     }
                 }
             }
+            
+            // Apply teammate avoidance to prevent crowding
+            AvoidTeammates(game, player, ref dx, ref dy, player.PlayerId.StartsWith("TeamA"));
             
             // Apply movement with boundary checking
             player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
@@ -1665,6 +1665,62 @@ namespace FootballCommentary.GAgents.GameState
             double naturalMovementX = Math.Sin(game.SimulationStep * 0.05 + phase + Math.PI) * 0.003;
             double naturalMovementY = Math.Cos(game.SimulationStep * 0.04 + phase + Math.PI) * 0.003;
             
+            // NEW: Count players in attacking half for defensive shape coordination
+            int teamPlayersInAttackingHalf = 0;
+            var teamPlayers = isTeamA ? game.HomeTeam.Players : game.AwayTeam.Players;
+            foreach (var teammate in teamPlayers)
+            {
+                bool teammateInAttackingHalf = (isTeamA && teammate.Position.X > 0.5) || 
+                                  (!isTeamA && teammate.Position.X < 0.5);
+                if (teammateInAttackingHalf)
+                {
+                    teamPlayersInAttackingHalf++;
+                }
+            }
+            
+            // NEW: Define strict maximum forward positions by role for defensive positioning
+            double maxForwardPosition;
+            if (isDefender) {
+                maxForwardPosition = isTeamA ? 0.5 : 0.5; // Defenders at midfield max
+                if (teamPlayersInAttackingHalf > 3) {
+                    maxForwardPosition = isTeamA ? 0.4 : 0.6; // More restrictive when too many forward
+                }
+            } else if (isMidfielder) {
+                // Holding midfielders (6, 8) have different restrictions than attacking midfielders (7, 9)
+                if (playerNumber == 6 || playerNumber == 8) {
+                    maxForwardPosition = isTeamA ? 0.55 : 0.45; // Defensive midfielders
+                } else {
+                    maxForwardPosition = isTeamA ? 0.65 : 0.35; // Attacking midfielders
+                }
+            } else {
+                // Forwards have more freedom but still limited
+                maxForwardPosition = isTeamA ? 0.8 : 0.2;
+            }
+            
+            // NEW: Check if player needs to retreat from beyond max position FIRST
+            bool playerTooFarForward = (isTeamA && player.Position.X > maxForwardPosition) || 
+                                     (!isTeamA && player.Position.X < maxForwardPosition);
+            
+            if (playerTooFarForward && playerWithBall != null) {
+                // Calculate retreat position (behind max forward position)
+                double retreatTargetX = isTeamA ? maxForwardPosition - 0.1 : maxForwardPosition + 0.1;
+                double retreatStrength = FORMATION_ADHERENCE * 5.0; // Very strong retreat force
+                
+                // Strong pull back to defensive position
+                dx = (retreatTargetX - player.Position.X) * retreatStrength;
+                
+                // Maintain Y position based on role
+                dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.0);
+                
+                _logger.LogDebug("DEFENSIVE RETREAT: Player {PlayerId} ({Role}) forced to retreat defensively from {Position}",
+                    player.PlayerId, isDefender ? "Defender" : isMidfielder ? "Midfielder" : "Forward", player.Position.X);
+                
+                // Apply the retreat move and skip other calculations
+                player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+                player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
+                return;
+            }
+            
             // First check if ball is loose and player should go for it
             if (string.IsNullOrEmpty(game.BallPossession) && game.Ball != null)
             {
@@ -1682,24 +1738,40 @@ namespace FootballCommentary.GAgents.GameState
                 // Find this player's rank in distance to ball
                 int myRank = allPlayers.FindIndex(p => p.PlayerId == player.PlayerId);
                 
-                // If this player is among the closest to the ball, go for it with higher priority
-                if (myRank < 3 || distToBall < 0.15)
+                // NEW: Check if player should go for ball based on tactical position
+                bool shouldGoForBall = false;
+                
+                // Only the closest 2 players should go for loose balls, unless the ball is in our defensive third
+                bool ballInDefensiveThird = (isTeamA && game.Ball.Position.X < 0.3) || 
+                                          (!isTeamA && game.Ball.Position.X > 0.7);
+                
+                // Loose ball in our defensive third - more players can go for it
+                if (ballInDefensiveThird && distToBall < 0.2) {
+                    shouldGoForBall = myRank < 4; // Up to 4 players can go for it in defensive third
+                }
+                // Loose ball elsewhere - fewer players should go for it to maintain shape
+                else if (distToBall < 0.15) {
+                    shouldGoForBall = myRank < 2; // Only 2 closest players go for it
+                }
+                
+                // If player should go for loose ball
+                if (shouldGoForBall)
                 {
-                    double ballAttractionStrength = LOOSE_BALL_ATTRACTION * 1.2; // Slightly higher when opponent doesn't have ball
+                    double ballAttractionStrength = LOOSE_BALL_ATTRACTION;
                     
                     // Adjust attraction based on distance - closer players are more attracted
-                    ballAttractionStrength *= (1.0 - Math.Min(distToBall, 0.3) / 0.3) * 2.0;
+                    ballAttractionStrength *= (1.0 - Math.Min(distToBall, 0.3) / 0.3) * 1.7;
                     
                     // Adjust attraction based on player role and field position
-                    bool ballInOurHalf = (isTeamA && game.Ball.Position.X < 0.5) || (!isTeamA && game.Ball.Position.X > 0.5);
+                    bool isLooseBallInOurHalf = (isTeamA && game.Ball.Position.X < 0.5) || (!isTeamA && game.Ball.Position.X > 0.5);
                     
-                    if (isDefender && ballInOurHalf) ballAttractionStrength *= 1.8; // Defenders prioritize ball in our half
-                    else if (isDefender) ballAttractionStrength *= 0.7; // Defenders less interested in opponent half
+                    if (isDefender && isLooseBallInOurHalf) ballAttractionStrength *= 1.8; // Defenders prioritize ball in our half
+                    else if (isDefender) ballAttractionStrength *= 0.6; // Defenders less interested in opponent half
                     
-                    if (isMidfielder) ballAttractionStrength *= 1.3; // Midfielders generally go for ball
+                    if (isMidfielder) ballAttractionStrength *= 1.2; // Midfielders generally go for ball
                     
-                    if (isForward && !ballInOurHalf) ballAttractionStrength *= 1.3; // Forwards more interested in opponent half
-                    else if (isForward) ballAttractionStrength *= 0.7; // Forwards less interested in our half
+                    if (isForward && !isLooseBallInOurHalf) ballAttractionStrength *= 1.1; // Forwards more interested in opponent half
+                    else if (isForward) ballAttractionStrength *= 0.6; // Forwards less interested in our half
                     
                     // Move toward ball
                     dx += (game.Ball.Position.X - player.Position.X) * ballAttractionStrength;
@@ -1709,165 +1781,242 @@ namespace FootballCommentary.GAgents.GameState
                     dx += (_random.NextDouble() - 0.5) * 0.01;
                     dy += (_random.NextDouble() - 0.5) * 0.01;
                     
-                    // Return early if going for the loose ball, overriding normal defensive behavior
+                    // Apply movement with boundary checking
                     player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
                     player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
                     return;
                 }
             }
             
-            // Continue with normal defensive positioning if not going for loose ball
-            // ... (rest of the function remains unchanged)
+            // Determine if the ball is in team's defensive half or in opponent's half
+            bool ballInDefensiveHalf = (isTeamA && targetPos.X < 0.5) || (!isTeamA && targetPos.X > 0.5);
             
+            // Check if player needs to retreat from opponent's half
+            bool playerInOpponentHalf = (isTeamA && player.Position.X > 0.5) || (!isTeamA && player.Position.X < 0.5);
+            
+            // Stronger retreat force when opponent has the ball and player is in their half
+            if (playerInOpponentHalf && playerWithBall != null) {
+                // Calculate retreat position (slightly behind midfield)
+                double retreatTargetX = isTeamA ? 0.45 : 0.55;
+                double retreatStrength = FORMATION_ADHERENCE * 4.0; // Increased from 3.5
+                
+                // Apply retreat force based on player role (all stronger now)
+                if (isDefender) {
+                    // Defenders retreat most urgently to their defensive positions
+                    retreatStrength *= 1.8; // Increased from 1.5
+                    retreatTargetX = isTeamA ? 0.35 : 0.65; // Deeper position for defenders
+                } else if (isMidfielder) {
+                    // Midfielders retreat to midfield
+                    retreatStrength *= 1.5; // Increased from 1.3
+                } else if (isForward) {
+                    // Even forwards retreat, but not as deep
+                    retreatStrength *= 1.2; // Increased from 1.1
+                }
+                
+                // Strong pull back to own half
+                dx = (retreatTargetX - player.Position.X) * retreatStrength;
+                
+                // Maintain some of the Y position relative to base position
+                dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.0); // Increased from 1.5
+                
+                // Add natural movements and continue to the normal positioning logic with reduced effect
+                dx += naturalMovementX;
+                dy += naturalMovementY;
+                
+                // Apply movement with boundary checking
+                player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+                player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
+                return; // Skip other calculations since retreat takes priority
+            }
+            
+            // Check if ball is in player's team's defensive half (indicating a direct threat)
+            bool ballThreateningOwnGoal = (isTeamA && targetPos.X < 0.4) || (!isTeamA && targetPos.X > 0.6);
+
             // Defensive positioning based on player role
             if (isGoalkeeper) {
                 // Goalkeeper stays near the goal, with slight adjustment based on ball position
-                dx = (basePosition.X - player.Position.X) * (FORMATION_ADHERENCE * 5.0);
+                dx = (basePosition.X - player.Position.X) * (FORMATION_ADHERENCE * 7.0);
                 
                 // Goalkeepers adjust Y position based on ball position, but limited movement
                 double targetY = 0.5 + (targetPos.Y - 0.5) * 0.5; // Move toward ball's Y position, but only 50%
                 targetY = Math.Clamp(targetY, 0.3, 0.7); // Limit keeper's range
-                dy = (targetY - player.Position.Y) * (FORMATION_ADHERENCE * 2.0);
+                dy = (targetY - player.Position.Y) * (FORMATION_ADHERENCE * 3.0);
+                
+                // Apply natural movements for slight variation
+                dx += naturalMovementX * 0.5;
+                dy += naturalMovementY * 0.5;
             }
             else if (isDefender) {
-                // Defenders focus on maintaining defensive shape and position
-                dx = (basePosition.X - player.Position.X) * (FORMATION_ADHERENCE * 1.2); // Reduced from 1.5
-                dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.0); // Reduced from 1.2
-                
-                // Add more natural movement with increased randomness for defenders
-                dx += naturalMovementX * 1.2; // Increased from 1.0
-                dy += naturalMovementY * 1.2; // Increased from 1.0
-                
-                // Add additional random movement for defenders to make them less predictable
-                dx += (_random.NextDouble() - 0.5) * 0.01;
-                dy += (_random.NextDouble() - 0.5) * 0.01;
-                
-                // Defenders shift slightly toward ball side
-                double ballSideShift = (targetPos.Y - 0.5) * 0.3; // Shift 30% toward ball's side
-                dy += ballSideShift * PLAYER_SPEED * 0.2;
-                
-                // Only nearest defender actively approaches ball carrier
-                if (playerWithBall != null) {
-                    double distanceToTarget = Math.Sqrt(
-                        Math.Pow(player.Position.X - targetPos.X, 2) +
-                        Math.Pow(player.Position.Y - targetPos.Y, 2));
+                // Defenders focus on maintaining defensive shape and marking
+                if (ballThreateningOwnGoal) {
+                    // When ball is threatening our goal, defenders drop deeper
+                    double defensivePositionX = isTeamA ? 0.2 : 0.8; // Deeper defensive position
+                    dx = (defensivePositionX - player.Position.X) * (FORMATION_ADHERENCE * 4.0); // Increased pull
                     
-                    // Defensive third is where defenders become active
-                    bool ballInDefensiveThird = (isTeamA && targetPos.X < 0.4) || 
-                                              (!isTeamA && targetPos.X > 0.6);
-                              
-                    // Find if this is the closest defender
-                    bool isClosestDefender = false;
-                    var teammates = isTeamA ? game.HomeTeam.Players : game.AwayTeam.Players;
-                    var otherDefenders = teammates
-                        .Where(p => {
-                            // Get other player's number 
-                            int otherNum = TryParsePlayerId(p.PlayerId) ?? 0;
-                            otherNum += 1;
-                            return p.PlayerId != player.PlayerId && otherNum >= 2 && otherNum <= 5;
-                        })
-                        .ToList();
+                    // Shift toward ball side but maintain defensive line
+                    double ballSideShift = (targetPos.Y - 0.5) * 0.4; // Shift 40% toward ball's side
+                    double targetY = basePosition.Y + ballSideShift;
+                    targetY = Math.Clamp(targetY, 0.2, 0.8); // Ensure not too wide
+                    dy = (targetY - player.Position.Y) * (FORMATION_ADHERENCE * 3.0);
+                    
+                    // Only nearest defender actively approaches ball carrier
+                    if (playerWithBall != null) {
+                        double distanceToTarget = Math.Sqrt(
+                            Math.Pow(player.Position.X - targetPos.X, 2) +
+                            Math.Pow(player.Position.Y - targetPos.Y, 2));
                         
-                    // Calculate distances for all defenders
-                    var defenderDistances = otherDefenders
-                        .Select(p => Math.Sqrt(
-                            Math.Pow(p.Position.X - targetPos.X, 2) +
-                            Math.Pow(p.Position.Y - targetPos.Y, 2)))
-                        .ToList();
+                        // Find if this is the closest defender
+                        var otherDefenders = teamPlayers
+                            .Where(p => {
+                                int otherNum = TryParsePlayerId(p.PlayerId) ?? 0;
+                                otherNum += 1;
+                                return p.PlayerId != player.PlayerId && otherNum >= 2 && otherNum <= 5;
+                            });
                         
-                    // Am I the closest defender?
-                    isClosestDefender = !defenderDistances.Any(d => d < distanceToTarget);
+                        bool isClosestDefender = !otherDefenders.Any(p => 
+                            CalculateDistance(p.Position, targetPos) < distanceToTarget);
                         
-                    if (ballInDefensiveThird && (isClosestDefender || distanceToTarget < 0.15)) {
-                        // Defensive pressure, but with reduced effectiveness
-                        double pressureFactor = PLAYER_SPEED * 0.7; // Reduced from 0.8
-                        dx += (targetPos.X - player.Position.X) * pressureFactor;
-                        dy += (targetPos.Y - player.Position.Y) * pressureFactor;
-                        
-                        // Occasionally make defensive errors (10% chance)
-                        if (_random.NextDouble() < 0.1) {
-                            // Random movement instead of proper defending
-                            double errorX = (_random.NextDouble() - 0.5) * 0.03;
-                            double errorY = (_random.NextDouble() - 0.5) * 0.03;
-                            
-                            // Replace calculated movement with error movement
-                            dx = errorX;
-                            dy = errorY;
+                        if (isClosestDefender && distanceToTarget < 0.15) {
+                            // Adjust movement to close down attacker
+                            dx = (targetPos.X - player.Position.X) * 0.05;
+                            dy = (targetPos.Y - player.Position.Y) * 0.05;
                         }
                     }
                 }
+                else {
+                    // Ball not directly threatening - maintain defensive shape with more compactness
+                    double defensiveLineX;
+                    if (ballInDefensiveHalf) {
+                        // Ball in our half - defenders drop a bit deeper
+                        defensiveLineX = isTeamA ? 0.3 : 0.7;
+                    } else {
+                        // Ball in opponent half - defenders push to midfield
+                        defensiveLineX = isTeamA ? 0.4 : 0.6;
+                    }
+                    
+                    // Strong pull toward defensive line
+                    dx = (defensiveLineX - player.Position.X) * (FORMATION_ADHERENCE * 3.5);
+                    
+                    // Maintain horizontal spacing based on formation role
+                    dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.5);
+                    
+                    // Shift slightly toward ball side to maintain defensive compactness
+                    double ballSideShift = (targetPos.Y - 0.5) * 0.3;
+                    dy += ballSideShift * 0.02;
+                }
+                
+                // Add natural movement for defenders
+                dx += naturalMovementX;
+                dy += naturalMovementY;
             }
             else if (isMidfielder) {
-                // Midfielders balance between defensive duties and maintaining shape
-                dx = (basePosition.X - player.Position.X) * (FORMATION_ADHERENCE * 1.2); // Reduced from 1.5
-                dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.0); // Reduced from 1.2
+                bool isHoldingMidfielder = (playerNumber == 6 || playerNumber == 8);
                 
-                // Add more natural movement
+                // Midfielders - balance between pressing and defensive shape
+                if (ballThreateningOwnGoal) {
+                    // Ball threatening goal - midfielders drop to help defense
+                    double supportPositionX = isTeamA ? 0.3 : 0.7; // Deep support position
+                    dx = (supportPositionX - player.Position.X) * (FORMATION_ADHERENCE * 3.5);
+                    
+                    // Holding midfielders tighter to center, wide midfielders maintain width
+                    double supportYFactor = isHoldingMidfielder ? 0.8 : 0.5;
+                    double targetY = 0.5 + (basePosition.Y - 0.5) * supportYFactor;
+                    dy = (targetY - player.Position.Y) * (FORMATION_ADHERENCE * 2.5);
+                    
+                    _logger.LogDebug("Midfielder {PlayerId} dropping deep as ball is threatening", player.PlayerId);
+                }
+                else if (ballInDefensiveHalf) {
+                    // Ball in our half but not threatening - midfielders form compact block
+                    double blockPositionX = isTeamA ? 0.4 : 0.6; // Form midfield block
+                    dx = (blockPositionX - player.Position.X) * (FORMATION_ADHERENCE * 3.0);
+                    
+                    // Get compact horizontally but maintain lanes
+                    double compactYFactor = 0.7; // Bring slightly toward center from base position
+                    double targetY = 0.5 + (basePosition.Y - 0.5) * compactYFactor;
+                    dy = (targetY - player.Position.Y) * (FORMATION_ADHERENCE * 2.0);
+                    
+                    // Holding midfielders track nearest opponent
+                    if (isHoldingMidfielder && playerWithBall != null) {
+                        double distanceToTarget = Math.Sqrt(
+                            Math.Pow(player.Position.X - targetPos.X, 2) +
+                            Math.Pow(player.Position.Y - targetPos.Y, 2));
+                        
+                        if (distanceToTarget < 0.2) {
+                            // Move to press/track opponent
+                            dx += (targetPos.X - player.Position.X) * 0.04;
+                            dy += (targetPos.Y - player.Position.Y) * 0.04;
+                        }
+                    }
+                }
+                else {
+                    // Ball in opponent half - midfielders push up but maintain balance
+                    double pressPositionX;
+                    if (isHoldingMidfielder) {
+                        // Holding midfielders stay near midfield
+                        pressPositionX = isTeamA ? 0.5 : 0.5;
+                    } else {
+                        // Attacking midfielders push higher to press
+                        pressPositionX = isTeamA ? 0.55 : 0.45;
+                    }
+                    
+                    dx = (pressPositionX - player.Position.X) * (FORMATION_ADHERENCE * 2.5);
+                    dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.8);
+                }
+                
+                // Add natural movement for midfielders
                 dx += naturalMovementX * 1.5;
                 dy += naturalMovementY * 1.5;
-                
-                // Slight shift toward ball
-                double ballSideShift = (targetPos.Y - 0.5) * 0.4; // Shift 40% toward ball's side
-                dy += ballSideShift * PLAYER_SPEED * 0.3;
-                
-                // Middle third is where midfielders are most active
-                bool ballInMiddleThird = (targetPos.X >= 0.3 && targetPos.X <= 0.7);
-                
-                if (playerWithBall != null && ballInMiddleThird) {
-                    // Get distance to ball
-                    double distanceToTarget = Math.Sqrt(
-                        Math.Pow(player.Position.X - targetPos.X, 2) +
-                        Math.Pow(player.Position.Y - targetPos.Y, 2));
-                        
-                    // Midfielder pressing - more active but selective
-                    if (distanceToTarget < 0.2 && playerNumber % 2 == 0) { // Only some midfielders press
-                        double pressureFactor = PLAYER_SPEED * 0.7;
-                        dx += (targetPos.X - player.Position.X) * pressureFactor;
-                        dy += (targetPos.Y - player.Position.Y) * pressureFactor;
-                    }
-                }
             }
             else if (isForward) {
-                // Forwards maintain higher position but provide light pressure
-                dx = (basePosition.X - player.Position.X) * FORMATION_ADHERENCE * 0.8; // Reduced pull to position
-                dy = (basePosition.Y - player.Position.Y) * FORMATION_ADHERENCE * 0.8;
+                // Forwards - first line of defense, pressing and cutting passing lanes
                 
-                // Add more natural movement
-                dx += naturalMovementX * 2.0;
-                dy += naturalMovementY * 2.0;
+                // Check if this forward should press or drop based on team tactics
+                bool shouldPress = (playerNumber == 10) || (teamPlayersInAttackingHalf < 3);
                 
-                // Forwards stay somewhat forward even when defending
-                double minPosition = isTeamA ? 0.4 : 0.6;
-                if ((isTeamA && player.Position.X < minPosition) ||
-                    (!isTeamA && player.Position.X > minPosition)) {
-                    // Pull forward to maintain attacking position
-                    double pullFactor = PLAYER_SPEED * 0.5;
-                    dx += (isTeamA ? pullFactor : -pullFactor);
+                if (ballInDefensiveHalf) {
+                    // Ball in our half - forwards drop to midfield at most
+                    double dropPositionX = isTeamA ? 0.45 : 0.55; // Drop to midfield
+                    dx = (dropPositionX - player.Position.X) * (FORMATION_ADHERENCE * 2.5);
+                    dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.5);
                 }
-                
-                // Forwards only press in attacking third
-                bool ballInAttackingThird = (isTeamA && targetPos.X > 0.6) ||
-                                          (!isTeamA && targetPos.X < 0.4);
-                                          
-                // Limited pressing from forwards - only if ball is in attacking third
-                if (playerWithBall != null && ballInAttackingThird) {
-                    double distanceToTarget = Math.Sqrt(
-                       Math.Pow(player.Position.X - targetPos.X, 2) +
-                       Math.Pow(player.Position.Y - targetPos.Y, 2));
-
-                    if (distanceToTarget < 0.15) { // Close enough to press
-                        double pressureFactor = PLAYER_SPEED * 0.6;
-                        dx += (targetPos.X - player.Position.X) * pressureFactor;
-                        dy += (targetPos.Y - player.Position.Y) * pressureFactor;
+                else {
+                    // Ball in opponent half - press or cut passing lanes
+                    if (shouldPress && playerWithBall != null) {
+                        double distanceToTarget = Math.Sqrt(
+                            Math.Pow(player.Position.X - targetPos.X, 2) +
+                            Math.Pow(player.Position.Y - targetPos.Y, 2));
+                        
+                        if (distanceToTarget < 0.25) { // Within pressing distance
+                            // Press intensely
+                            dx = (targetPos.X - player.Position.X) * 0.08;
+                            dy = (targetPos.Y - player.Position.Y) * 0.08;
+                        } else {
+                            // Position to cut passing lanes
+                            double pressPositionX = isTeamA ? 0.6 : 0.4; // Press position
+                            dx = (pressPositionX - player.Position.X) * (FORMATION_ADHERENCE * 2.0);
+                            
+                            // Position between ball and goal
+                            double interceptY = 0.5 + (targetPos.Y - 0.5) * 0.7;
+                            dy = (interceptY - player.Position.Y) * (FORMATION_ADHERENCE * 1.5);
+                        }
+                    } else {
+                        // Not pressing - maintain higher position to be ready for counter
+                        double counterPositionX = isTeamA ? 0.55 : 0.45; // Just ahead of midfield
+                        dx = (counterPositionX - player.Position.X) * (FORMATION_ADHERENCE * 1.8);
+                        dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.2);
                     }
                 }
+                
+                // Add natural movement for forwards
+                dx += naturalMovementX * 2.0;
+                dy += naturalMovementY * 2.0;
             }
             
             // All players: avoid clustering with teammates
             AvoidTeammates(game, player, ref dx, ref dy, isTeamA);
             
             // Small random movement for naturalism - reduced for goalkeepers
-            double randomFactor = isGoalkeeper ? 0.1 : 0.3;
+            double randomFactor = isGoalkeeper ? 0.1 : 0.2; // Reduced from 0.3
             dx += (_random.NextDouble() - 0.5) * PLAYER_SPEED * randomFactor;
             dy += (_random.NextDouble() - 0.5) * PLAYER_SPEED * randomFactor;
 
@@ -1889,7 +2038,7 @@ namespace FootballCommentary.GAgents.GameState
                 : game.AwayTeam.Players.Where(p => p.PlayerId != player.PlayerId);
             
             // Define minimum comfortable distance between teammates
-            const double MIN_TEAMMATE_DISTANCE = 0.1;
+            const double MIN_TEAMMATE_DISTANCE = 0.15; // Increased from 0.1 for better spacing
             
             foreach (var teammate in teammates)
             {
@@ -1902,11 +2051,11 @@ namespace FootballCommentary.GAgents.GameState
                 {
                     // Calculate vector direction away from teammate
                     double avoidanceStrength = (MIN_TEAMMATE_DISTANCE - distToTeammate) / MIN_TEAMMATE_DISTANCE;
-                    avoidanceStrength = Math.Min(avoidanceStrength, 0.5); // Cap the avoidance strength
+                    avoidanceStrength = Math.Min(avoidanceStrength * 1.5, 0.8); // Increased avoidance strength cap from 0.5 to 0.8 and multiplier
                     
                     // Add avoidance force (inversely proportional to distance)
-                    dx += (player.Position.X - teammate.Position.X) * avoidanceStrength * PLAYER_SPEED * 0.8;
-                    dy += (player.Position.Y - teammate.Position.Y) * avoidanceStrength * PLAYER_SPEED * 0.8;
+                    dx += (player.Position.X - teammate.Position.X) * avoidanceStrength * PLAYER_SPEED * 1.2; // Increased multiplier from 0.8 to 1.2
+                    dy += (player.Position.Y - teammate.Position.Y) * avoidanceStrength * PLAYER_SPEED * 1.2; // Increased multiplier from 0.8 to 1.2
                 }
             }
         }
@@ -2124,7 +2273,7 @@ namespace FootballCommentary.GAgents.GameState
                     {
                         // Calculate shot success probability based on distance to goal
                         // Closer shots have higher probability of success
-                        double successBaseProbability = 0.3; // Base 30% chance (down from 40%)
+                        double successBaseProbability = 0.6; // Increased from 0.4 to 0.6 for much higher scoring
                         
                         // Distance factor: shots from very close have higher probability
                         double distanceFactor = 1.0 - (distanceToGoal / SHOOTING_DISTANCE);
@@ -2134,20 +2283,20 @@ namespace FootballCommentary.GAgents.GameState
                         shooterPlayerNumber++; // Convert to 1-based index
                         
                         // Player role factor: forwards are better at shooting
-                        double roleFactor = 1.0;
+                        double roleFactor = 1.2; // Base factor increased from 1.0 to 1.2 for all players
                         bool shooterIsForward = shooterPlayerNumber >= 9;
                         bool shooterIsMidfielder = shooterPlayerNumber >= 6 && shooterPlayerNumber <= 8;
                         if (shooterIsForward) {
-                            roleFactor = 1.3; // Forwards are 30% better at shooting
+                            roleFactor = 1.5; // Increased from 1.4 - Forwards are 50% better at shooting
                         } else if (shooterIsMidfielder) {
-                            roleFactor = 1.1; // Midfielders are 10% better at shooting
+                            roleFactor = 1.4; // Increased from 1.2 - Midfielders are 40% better at shooting
                         }
                         
                         // Calculate final shot success probability
                         double shotSuccessProbability = successBaseProbability * distanceFactor * roleFactor;
                         
                         // Cap at a realistic maximum
-                        shotSuccessProbability = Math.Min(shotSuccessProbability, 0.7);
+                        shotSuccessProbability = Math.Min(shotSuccessProbability, 0.9); // Increased from 0.8 for even more scoring
                         
                         // Try to score
                         if (_random.NextDouble() < shotSuccessProbability)
@@ -2247,10 +2396,11 @@ namespace FootballCommentary.GAgents.GameState
                     
                     // Not close to goal, try to pass to teammates
                     // Base pass probability now increased from 5% to 15% for more frequent passing
-                    double passProbability = 0.15; 
+                    double passProbability = 0.08; // Reduced from 0.12 to increase shooting probability dramatically
                     
                     // Get player number to identify role
                     int playerNumber = possessorNumber; // already parsed earlier
+                    bool isGoalkeeper = playerNumber == 1; // Added check for goalkeeper
                     bool isDefender = playerNumber >= 2 && playerNumber <= 5;
                     bool isMidfielder = playerNumber >= 6 && playerNumber <= 8;
                     bool isForward = playerNumber >= 9;
@@ -2264,25 +2414,30 @@ namespace FootballCommentary.GAgents.GameState
                                            (!ballPossessorIsTeamA && playerWithBall.Position.X < 0.3);
                     
                     // Adjust pass probability based on role and field position
-                    if (isDefender && inDefensiveThird)
+                    if (isGoalkeeper)
                     {
-                        passProbability = 0.35; // 35% chance to pass when defender is in own third
-                        _logger.LogDebug("Defender in defensive third - increased pass probability to 35%");
+                        passProbability = 0.9; // Goalkeepers should almost always try to distribute
+                        _logger.LogDebug("Goalkeeper has ball - pass probability set to 90%");
+                    }
+                    else if (isDefender && inDefensiveThird)
+                    {
+                        passProbability = 0.3; // Reduced from 0.35 - Defenders pass less
+                        _logger.LogDebug("Defender in defensive third - increased pass probability to 30%");
                     }
                     else if (isMidfielder)
                     {
-                        passProbability = 0.22; // Midfielders pass more frequently in general
-                        _logger.LogDebug("Midfielder - base pass probability 22%");
+                        passProbability = 0.15; // Reduced from 0.20 - Midfielders more likely to shoot
+                        _logger.LogDebug("Midfielder - base pass probability 15%");
                     }
                     else if (isForward && inAttackingThird)
                     {
-                        passProbability = 0.18; // Forwards in attacking third slightly more likely to shoot than pass
-                        _logger.LogDebug("Forward in attacking third - pass probability 18%");
+                        passProbability = 0.1; // Reduced from 0.15 - Forwards much more likely to shoot
+                        _logger.LogDebug("Forward in attacking third - pass probability 10%");
                     }
                     else if (isForward && !inAttackingThird)
                     {
-                        passProbability = 0.28; // Forwards outside attacking third more likely to pass back
-                        _logger.LogDebug("Forward outside attacking third - pass probability 28%");
+                        passProbability = 0.2; // Reduced from 0.25 - Forwards more likely to shoot even outside attacking third
+                        _logger.LogDebug("Forward outside attacking third - pass probability 20%");
                     }
                     
                     // Increase pass probability if there are opponents nearby (under pressure)
@@ -2522,16 +2677,18 @@ namespace FootballCommentary.GAgents.GameState
                             player.Position.X += (_random.NextDouble() - 0.5) * 0.02;
                             player.Position.Y += (_random.NextDouble() - 0.5) * 0.02;
                             
-                            // Ensure player stays in appropriate team half
+                            // Ensure player stays in appropriate team half more strictly
                             if (isTeamA) {
-                                player.Position.X = Math.Min(player.Position.X, 0.49); // Keep Team A in left half
+                                // Team A (left half) - X should be less than 0.5
+                                // Allow slight overlap near centerline but not deep into opponent half
+                                player.Position.X = Math.Clamp(player.Position.X, 0.02, 0.48); 
                             } else {
-                                player.Position.X = Math.Max(player.Position.X, 0.51); // Keep Team B in right half
+                                // Team B (right half) - X should be greater than 0.5
+                                player.Position.X = Math.Clamp(player.Position.X, 0.52, 0.98);
                             }
                             
-                            // Ensure player stays in bounds
-                            player.Position.X = Math.Clamp(player.Position.X, 0.05, 0.95);
-                            player.Position.Y = Math.Clamp(player.Position.Y, 0.05, 0.95);
+                            // Ensure player stays in Y-bounds (within field lines)
+                            player.Position.Y = Math.Clamp(player.Position.Y, 0.02, 0.98);
                         }
                     }
                 }
@@ -2560,19 +2717,19 @@ namespace FootballCommentary.GAgents.GameState
                 return;
             }
 
-            // Expanded goal width - increased Y range to make goals easier to score
-            const double GOAL_X_MIN = 0.40; // Changed from 0.42 to make goal even wider
-            const double GOAL_X_MAX = 0.60; // Changed from 0.58 to make goal even wider
+            // Expanded goal width - massively increased Y range to make goals easier to score
+            const double GOAL_X_MIN = 0.35; // Changed from 0.38 to make goal even wider
+            const double GOAL_X_MAX = 0.65; // Changed from 0.62 to make goal even wider
             
-            // Only count goals if the ball is moving (i.e., has velocity) - prevents fake goals
-            bool ballIsMoving = Math.Abs(game.Ball.VelocityX) > 0.0005 || Math.Abs(game.Ball.VelocityY) > 0.0005; // Reduced from 0.001
+            // Only count goals if the ball is moving (i.e., has velocity) - with minimal requirements
+            bool ballIsMoving = Math.Abs(game.Ball.VelocityX) > 0.0001 || Math.Abs(game.Ball.VelocityY) > 0.0001; // Reduced from 0.0003
             
-            // Check that the ball is moving in the right direction for a goal - less strict requirements
-            bool isValidTeamBShot = game.Ball.VelocityX < -0.002; // Reduced from 0.003
-            bool isValidTeamAShot = game.Ball.VelocityX > 0.002;  // Reduced from 0.003
+            // Check that the ball is moving in the right direction for a goal - very lenient requirements
+            bool isValidTeamBShot = game.Ball.VelocityX < -0.0005; // Reduced from 0.001
+            bool isValidTeamAShot = game.Ball.VelocityX > 0.0005;  // Reduced from 0.001
 
             // Check if ball is in team A's goal - expanded goal areas
-            if (game.Ball.Position.X <= 0.04 && // Changed from 0.03 to 0.04
+            if (game.Ball.Position.X <= 0.06 && // Changed from 0.05 to 0.06
                 game.Ball.Position.Y >= GOAL_X_MIN && 
                 game.Ball.Position.Y <= GOAL_X_MAX &&
                 ballIsMoving && isValidTeamBShot) // Added velocity direction check
@@ -2638,7 +2795,7 @@ namespace FootballCommentary.GAgents.GameState
                 }
             }
             // Check if ball is in team B's goal - expanded goal areas
-            else if (game.Ball.Position.X >= 0.96 && // Changed from 0.97 to 0.96 
+            else if (game.Ball.Position.X >= 0.94 && // Changed from 0.95 to 0.94 
                      game.Ball.Position.Y >= GOAL_X_MIN && 
                      game.Ball.Position.Y <= GOAL_X_MAX &&
                      ballIsMoving && isValidTeamAShot) // Added velocity direction check
@@ -2733,176 +2890,98 @@ namespace FootballCommentary.GAgents.GameState
             // Add forward bias
             dx += forwardDirection * forwardBias;
             
-            // Check if path ahead is blocked by opponents
-            var opposingTeamPlayers = isTeamA ? game.AwayTeam.Players : game.HomeTeam.Players;
-            bool pathBlocked = false;
-            
-            // Look ahead in the player's forward direction
-            double lookAheadDistance = 0.12; // Distance to check for opponents
-            
-            // Calculate forward position to check for obstacles
-            double checkX = player.Position.X + forwardDirection * lookAheadDistance;
-            
-            // If at edge of field, don't move forward anymore
-            if ((isTeamA && checkX > 0.95) || (!isTeamA && checkX < 0.05))
+            // If player is a Goalkeeper, they should not move much with the ball, just hold position to distribute.
+            if (isGoalkeeper)
             {
-                pathBlocked = true;
-            }
-            
-            // Check for nearby opponents in path
-            foreach (var opponent in opposingTeamPlayers)
-            {
-                double distX = Math.Abs(opponent.Position.X - checkX);
-                double distY = Math.Abs(opponent.Position.Y - player.Position.Y);
+                dx = 0; // Goalkeeper holds position X
+                dy = 0; // Goalkeeper holds position Y
                 
-                // If opponent is ahead and close, path is blocked
-                if (distX < 0.08 && distY < 0.1)
+                // Minimal random movement to appear active while waiting for pass opportunity
+                dx += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.1; 
+                dy += (_random.NextDouble() - 0.5) * PLAYER_SPEED * 0.1;
+
+                _logger.LogDebug("Goalkeeper {PlayerId} has possession, holding position to distribute.", player.PlayerId);
+            }
+            else // Logic for outfield players
+            {
+                 // Check if path ahead is blocked by opponents
+                var opposingTeamPlayers = isTeamA ? game.AwayTeam.Players : game.HomeTeam.Players;
+                bool pathBlocked = false;
+                
+                // Look ahead in the player's forward direction
+                double lookAheadDistance = 0.12; // Distance to check for opponents
+                
+                // Calculate forward position to check for obstacles
+                double checkX = player.Position.X + forwardDirection * lookAheadDistance;
+                
+                // If at edge of field, don't move forward anymore
+                if ((isTeamA && checkX > 0.95) || (!isTeamA && checkX < 0.05))
                 {
                     pathBlocked = true;
-                    break;
                 }
-            }
-            
-            // Check if approaching goal
-            double goalPostX = isTeamA ? GOAL_POST_X_TEAM_B : GOAL_POST_X_TEAM_A;
-            double distanceToGoal = Math.Abs(player.Position.X - goalPostX);
-            bool inShootingZone = false;
-            
-            // Determine if player is in a good position to shoot - expanded the shooting zone
-            if (isTeamA) 
-            {
-                // For Team A, good shooting positions are on the right side of the field
-                inShootingZone = player.Position.X > 0.75 && // Changed from 0.8 to 0.75 to increase shooting zone
-                                 player.Position.Y > GOAL_X_MIN - 0.15 && // Expanded from 0.1 to 0.15
-                                 player.Position.Y < GOAL_X_MAX + 0.15; // Expanded from 0.1 to 0.15
-            }
-            else 
-            {
-                // For Team B, good shooting positions are on the left side of the field
-                inShootingZone = player.Position.X < 0.25 && // Changed from 0.2 to 0.25 to increase shooting zone
-                                 player.Position.Y > GOAL_X_MIN - 0.15 && // Expanded from 0.1 to 0.15
-                                 player.Position.Y < GOAL_X_MAX + 0.15; // Expanded from 0.1 to 0.15
-            }
-            
-            // Check for shooting opportunity - higher chance for forwards
-            double shootingChance = 0.08; // Increased base chance from 0.05 to 0.08
-            if (isForward) shootingChance = 0.25; // Forwards have much higher shooting chance - increased from 0.15 to 0.25
-            if (isMidfielder) shootingChance = 0.15; // Midfielders have higher shooting chance - increased from 0.1 to 0.15
-            
-            // Increase shooting chance when closer to goal
-            if (distanceToGoal < SHOOTING_DISTANCE * 0.5) {
-                shootingChance *= 4.0; // Quadruple shooting chance when very close - increased from 3.0
-            } 
-            else if (distanceToGoal < SHOOTING_DISTANCE) {
-                shootingChance *= 3.0; // Triple shooting chance when in shooting range - increased from 2.0
-            }
-            
-            // If in shooting zone, consider taking a shot
-            if (inShootingZone && _random.NextDouble() < shootingChance) {
-                // Calculate goal position with improved accuracy toward goal center
-                double goalY = 0.5; // Center of goal
-                // Reduced randomness for more accurate shots - reduced from 0.1 to 0.07
-                goalY += (_random.NextDouble() - 0.5) * 0.07; 
                 
-                // Calculate direction to goal
-                double shotDirX = (goalPostX - player.Position.X);
-                double shotDirY = (goalY - player.Position.Y);
-                double shotDist = Math.Sqrt(shotDirX * shotDirX + shotDirY * shotDirY);
-                
-                // Normalize and set velocity for shot - increased power
-                double shotPower = 0.06 + (_random.NextDouble() * 0.02); // Increased from 0.05 to 0.06
-                double shotVelX = (shotDirX / shotDist) * shotPower;
-                double shotVelY = (shotDirY / shotDist) * shotPower;
-                
-                // Release the ball (shoot)
-                game.BallPossession = string.Empty;
-                game.Ball.VelocityX = shotVelX;
-                game.Ball.VelocityY = shotVelY;
-                
-                _logger.LogInformation("SHOT taken by {PlayerId} in shooting zone", player.PlayerId);
-                
-                // Set initial ball position
-                game.Ball.Position.X = player.Position.X + shotVelX;
-                game.Ball.Position.Y = player.Position.Y + shotVelY;
-                
-                // Track who shot the ball for goal attribution
-                _lastShooterPlayerId = player.PlayerId;
-                
-                return;
-            }
-            
-            // NEW LOGIC: Force a shot when player is extremely close to goal but hasn't shot yet
-            bool isVeryCloseToGoal = false;
-            if (isTeamA)
-            {
-                // Team A: Check if player is extremely close to right goal (Liverpool's goal in screenshot)
-                isVeryCloseToGoal = player.Position.X > 0.9 && // Changed from 0.92 to be even more aggressive
-                                    player.Position.Y > GOAL_X_MIN - 0.1 && // Increased zone from 0.05 to 0.1
-                                    player.Position.Y < GOAL_X_MAX + 0.1; // Increased zone from 0.05 to 0.1
-            }
-            else
-            {
-                // Team B: Check if player is extremely close to left goal (Manchester's goal in screenshot)
-                isVeryCloseToGoal = player.Position.X < 0.1 && // Changed from 0.08 to be even more aggressive
-                                    player.Position.Y > GOAL_X_MIN - 0.1 && // Increased zone from 0.05 to 0.1
-                                    player.Position.Y < GOAL_X_MAX + 0.1; // Increased zone from 0.05 to 0.1
-            }
-
-            // If player is very close to goal, force a shot instead of continuing movement
-            if (isVeryCloseToGoal)
-            {
-                // Calculate direction toward goal center with improved accuracy
-                double goalY = 0.5; // Center of goal
-                
-                // Reduced randomization for more accurate forced shots
-                goalY += (_random.NextDouble() - 0.5) * 0.06; // Reduced from 0.1
-                
-                // Calculate direction vector to goal
-                double shotDirX = (goalPostX - player.Position.X);
-                double shotDirY = (goalY - player.Position.Y);
-                double shotDist = Math.Sqrt(shotDirX * shotDirX + shotDirY * shotDirY);
-                
-                // Normalize and set high velocity for shot - increased power
-                double shotVelX = (shotDirX / shotDist) * 0.06; // Increased from 0.05
-                double shotVelY = (shotDirY / shotDist) * 0.06; // Increased from 0.05
-                
-                // Release the ball (shoot)
-                game.BallPossession = string.Empty;
-                game.Ball.VelocityX = shotVelX;
-                game.Ball.VelocityY = shotVelY;
-                
-                // Log the forced shot
-                _logger.LogInformation("FORCED SHOT by {PlayerId} - very close to goal", player.PlayerId);
-                
-                // Set initial ball position
-                game.Ball.Position.X = player.Position.X + shotVelX;
-                game.Ball.Position.Y = player.Position.Y + shotVelY;
-                
-                // Track who shot the ball for goal attribution
-                _lastShooterPlayerId = player.PlayerId;
-                
-                return;
-            }
-
-            // Additional check for unexpected powerful shots when near goal area
-            if ((isTeamA && player.Position.X > 0.85) || (!isTeamA && player.Position.X < 0.15))
-            {
-                // Player is near goal but not quite in the very close zone - give extra chance to shoot
-                double opportunisticShotChance = isForward ? 0.2 : 0.1; // Forwards are more opportunistic
-                
-                if (_random.NextDouble() < opportunisticShotChance)
+                // Check for nearby opponents in path
+                foreach (var opponent in opposingTeamPlayers)
                 {
-                    // Calculate goal target with good accuracy
+                    double distX = Math.Abs(opponent.Position.X - checkX);
+                    double distY = Math.Abs(opponent.Position.Y - player.Position.Y);
+                    
+                    // If opponent is ahead and close, path is blocked
+                    if (distX < 0.08 && distY < 0.1)
+                    {
+                        pathBlocked = true;
+                        break;
+                    }
+                }
+                
+                // Check if approaching goal
+                double goalPostX = isTeamA ? GOAL_POST_X_TEAM_B : GOAL_POST_X_TEAM_A;
+                double distanceToGoal = Math.Abs(player.Position.X - goalPostX);
+                bool inShootingZone = false;
+                
+                // Determine if player is in a good position to shoot - expanded the shooting zone
+                if (isTeamA) 
+                {
+                    // For Team A, good shooting positions are on the right side of the field
+                    inShootingZone = player.Position.X > 0.75 && // Changed from 0.8 to 0.75 to increase shooting zone
+                                     player.Position.Y > GOAL_X_MIN - 0.15 && // Expanded from 0.1 to 0.15
+                                     player.Position.Y < GOAL_X_MAX + 0.15; // Expanded from 0.1 to 0.15
+                }
+                else 
+                {
+                    // For Team B, good shooting positions are on the left side of the field
+                    inShootingZone = player.Position.X < 0.25 && // Changed from 0.2 to 0.25 to increase shooting zone
+                                     player.Position.Y > GOAL_X_MIN - 0.15 && // Expanded from 0.1 to 0.15
+                                     player.Position.Y < GOAL_X_MAX + 0.15; // Expanded from 0.1 to 0.15
+                }
+                
+                // Check for shooting opportunity - higher chance for forwards
+                double shootingChance = 0.08; // Increased base chance from 0.05 to 0.08
+                if (isForward) shootingChance = 0.25; // Forwards have much higher shooting chance - increased from 0.15 to 0.25
+                if (isMidfielder) shootingChance = 0.15; // Midfielders have higher shooting chance - increased from 0.1 to 0.15
+                
+                // Increase shooting chance when closer to goal
+                if (distanceToGoal < SHOOTING_DISTANCE * 0.5) {
+                    shootingChance *= 4.0; // Quadruple shooting chance when very close - increased from 3.0
+                } 
+                else if (distanceToGoal < SHOOTING_DISTANCE) {
+                    shootingChance *= 3.0; // Triple shooting chance when in shooting range - increased from 2.0
+                }
+                
+                // If in shooting zone, consider taking a shot
+                if (inShootingZone && _random.NextDouble() < shootingChance) {
+                    // Calculate goal position with improved accuracy toward goal center
                     double goalY = 0.5; // Center of goal
-                    goalY += (_random.NextDouble() - 0.5) * 0.08; // Slight randomization
+                    // Reduced randomness for more accurate shots - reduced from 0.1 to 0.07
+                    goalY += (_random.NextDouble() - 0.5) * 0.07; 
                     
                     // Calculate direction to goal
                     double shotDirX = (goalPostX - player.Position.X);
                     double shotDirY = (goalY - player.Position.Y);
                     double shotDist = Math.Sqrt(shotDirX * shotDirX + shotDirY * shotDirY);
                     
-                    // Set velocity for powerful shot
-                    double shotPower = 0.07; // Strong shot
+                    // Normalize and set velocity for shot - increased power
+                    double shotPower = 0.06 + (_random.NextDouble() * 0.02); // Increased from 0.05 to 0.06
                     double shotVelX = (shotDirX / shotDist) * shotPower;
                     double shotVelY = (shotDirY / shotDist) * shotPower;
                     
@@ -2911,7 +2990,7 @@ namespace FootballCommentary.GAgents.GameState
                     game.Ball.VelocityX = shotVelX;
                     game.Ball.VelocityY = shotVelY;
                     
-                    _logger.LogInformation("OPPORTUNISTIC SHOT by {PlayerId} near goal area!", player.PlayerId);
+                    _logger.LogInformation("SHOT taken by {PlayerId} in shooting zone", player.PlayerId);
                     
                     // Set initial ball position
                     game.Ball.Position.X = player.Position.X + shotVelX;
@@ -2922,49 +3001,151 @@ namespace FootballCommentary.GAgents.GameState
                     
                     return;
                 }
-            }
-            
-            // Continue with existing logic...
-            if (pathBlocked)
-            {
-                dx *= 0.2; // Slow down significantly but don't completely stop
                 
-                if (inShootingZone)
+                // NEW LOGIC: Force a shot when player is extremely close to goal but hasn't shot yet
+                bool isVeryCloseToGoal = false;
+                if (isTeamA)
                 {
-                    // If in a shooting position and blocked, favor lateral movement to find space
-                    if (_random.NextDouble() < 0.7) // 70% chance to move laterally when blocked
-                    {
-                        // Choose direction (+1 or -1)
-                        int lateralDir = _random.NextDouble() < 0.5 ? 1 : -1;
-                        dy += lateralDir * PLAYER_SPEED * 0.8;
-                        _logger.LogDebug("Player finding space in shooting zone: {PlayerId}", player.PlayerId);
-                    }
-                    else
-                    {
-                        // Maybe try to pass or shoot instead of moving
-                        // This is handled elsewhere in the code
-                    }
+                    // Team A: Check if player is extremely close to right goal (Liverpool's goal in screenshot)
+                    isVeryCloseToGoal = player.Position.X > 0.9 && // Changed from 0.92 to be even more aggressive
+                                        player.Position.Y > GOAL_X_MIN - 0.1 && // Increased zone from 0.05 to 0.1
+                                        player.Position.Y < GOAL_X_MAX + 0.1; // Increased zone from 0.05 to 0.1
                 }
                 else
                 {
-                    // Not in shooting zone, add some randomization to movement
-                    dy += (_random.NextDouble() - 0.5) * PLAYER_SPEED;
+                    // Team B: Check if player is extremely close to left goal (Manchester's goal in screenshot)
+                    isVeryCloseToGoal = player.Position.X < 0.1 && // Changed from 0.08 to be even more aggressive
+                                        player.Position.Y > GOAL_X_MIN - 0.1 && // Increased zone from 0.05 to 0.1
+                                        player.Position.Y < GOAL_X_MAX + 0.1; // Increased zone from 0.05 to 0.1
+                }
+
+                // If player is very close to goal, force a shot instead of continuing movement
+                if (isVeryCloseToGoal)
+                {
+                    // Calculate direction toward goal center with improved accuracy
+                    double goalY = 0.5; // Center of goal
+                    
+                    // Reduced randomization for more accurate forced shots
+                    goalY += (_random.NextDouble() - 0.5) * 0.06; // Reduced from 0.1
+                    
+                    // Calculate direction vector to goal
+                    double shotDirX = (goalPostX - player.Position.X);
+                    double shotDirY = (goalY - player.Position.Y);
+                    double shotDist = Math.Sqrt(shotDirX * shotDirX + shotDirY * shotDirY);
+                    
+                    // Normalize and set high velocity for shot - increased power
+                    double shotVelX = (shotDirX / shotDist) * 0.06; // Increased from 0.05
+                    double shotVelY = (shotDirY / shotDist) * 0.06; // Increased from 0.05
+                    
+                    // Release the ball (shoot)
+                    game.BallPossession = string.Empty;
+                    game.Ball.VelocityX = shotVelX;
+                    game.Ball.VelocityY = shotVelY;
+                    
+                    // Log the forced shot
+                    _logger.LogInformation("FORCED SHOT by {PlayerId} - very close to goal", player.PlayerId);
+                    
+                    // Set initial ball position
+                    game.Ball.Position.X = player.Position.X + shotVelX;
+                    game.Ball.Position.Y = player.Position.Y + shotVelY;
+                    
+                    // Track who shot the ball for goal attribution
+                    _lastShooterPlayerId = player.PlayerId;
+                    
+                    return;
+                }
+
+                // Additional check for unexpected powerful shots when near goal area
+                if ((isTeamA && player.Position.X > 0.85) || (!isTeamA && player.Position.X < 0.15))
+                {
+                    // Player is near goal but not quite in the very close zone - give extra chance to shoot
+                    double opportunisticShotChance = isForward ? 0.2 : 0.1; // Forwards are more opportunistic
+                    
+                    if (_random.NextDouble() < opportunisticShotChance)
+                    {
+                        // Calculate goal target with good accuracy
+                        double goalY = 0.5; // Center of goal
+                        goalY += (_random.NextDouble() - 0.5) * 0.08; // Slight randomization
+                        
+                        // Calculate direction to goal
+                        double shotDirX = (goalPostX - player.Position.X);
+                        double shotDirY = (goalY - player.Position.Y);
+                        double shotDist = Math.Sqrt(shotDirX * shotDirX + shotDirY * shotDirY);
+                        
+                        // Set velocity for powerful shot
+                        double shotPower = 0.07; // Strong shot
+                        double shotVelX = (shotDirX / shotDist) * shotPower;
+                        double shotVelY = (shotDirY / shotDist) * shotPower;
+                        
+                        // Release the ball (shoot)
+                        game.BallPossession = string.Empty;
+                        game.Ball.VelocityX = shotVelX;
+                        game.Ball.VelocityY = shotVelY;
+                        
+                        _logger.LogInformation("OPPORTUNISTIC SHOT by {PlayerId} near goal area!", player.PlayerId);
+                        
+                        // Set initial ball position
+                        game.Ball.Position.X = player.Position.X + shotVelX;
+                        game.Ball.Position.Y = player.Position.Y + shotVelY;
+                        
+                        // Track who shot the ball for goal attribution
+                        _lastShooterPlayerId = player.PlayerId;
+                        
+                        return;
+                    }
+                }
+                
+                // Continue with existing logic...
+                if (pathBlocked)
+                {
+                    dx *= 0.2; // Slow down significantly but don't completely stop
+                    
+                    if (inShootingZone)
+                    {
+                        // If in a shooting position and blocked, favor lateral movement to find space
+                        if (_random.NextDouble() < 0.7) // 70% chance to move laterally when blocked
+                        {
+                            // Choose direction (+1 or -1)
+                            int lateralDir = _random.NextDouble() < 0.5 ? 1 : -1;
+                            dy += lateralDir * PLAYER_SPEED * 0.8;
+                            _logger.LogDebug("Player finding space in shooting zone: {PlayerId}", player.PlayerId);
+                        }
+                        else
+                        {
+                            // Maybe try to pass or shoot instead of moving
+                            // This is handled elsewhere in the code
+                        }
+                    }
+                    else
+                    {
+                        // Not in shooting zone, add some randomization to movement
+                        dy += (_random.NextDouble() - 0.5) * PLAYER_SPEED;
+                    }
+                }
+                
+                // Limit movement to field boundaries
+                double newX = Math.Clamp(player.Position.X + dx, 0, 1);
+                double newY = Math.Clamp(player.Position.Y + dy, 0, 1);
+                
+                // Update player position
+                player.Position.X = newX;
+                player.Position.Y = newY;
+                
+                // Update ball position to match player - This must be outside the if/else for goalkeepers
+                game.Ball.Position = player.Position; 
+                
+                // _logger.LogDebug moved into respective blocks to avoid logging pathBlocked for GKs
+                if (isGoalkeeper)
+                {
+                    _logger.LogDebug("Moved ball possessor (GK) {PlayerId}: dx={DX}, dy={DY}", 
+                        player.PlayerId, dx, dy);
+                }
+                else
+                {
+                    _logger.LogDebug("Moved ball possessor (Outfield) {PlayerId}: dx={DX}, dy={DY}, pathBlocked={PathBlocked}, inShootingZone={InShootingZone}", 
+                        player.PlayerId, dx, dy, pathBlocked, inShootingZone); // pathBlocked and inShootingZone are local to the else block
                 }
             }
-            
-            // Limit movement to field boundaries
-            double newX = Math.Clamp(player.Position.X + dx, 0, 1);
-            double newY = Math.Clamp(player.Position.Y + dy, 0, 1);
-            
-            // Update player position
-            player.Position.X = newX;
-            player.Position.Y = newY;
-            
-            // Update ball position to match player
-            game.Ball.Position = player.Position;
-            
-            _logger.LogDebug("Moved ball possessor {PlayerId}: dx={DX}, dy={DY}, pathBlocked={PathBlocked}, inShootingZone={InShootingZone}", 
-                player.PlayerId, dx, dy, pathBlocked, inShootingZone);
         }
 
         // Modified to track if a goal has been scored recently

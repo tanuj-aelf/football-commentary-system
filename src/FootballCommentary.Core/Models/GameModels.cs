@@ -92,6 +92,7 @@ namespace FootballCommentary.Core.Models
         [Id(8)] public string BallPossession { get; set; } = string.Empty;
         [Id(9)] public int SimulationStep { get; set; } = 0;
         [Id(10)] public string? LastScoringTeamId { get; set; }
+        [Id(11)] public TimeSpan? FinalGameTime { get; set; }
         
         public IEnumerable<Player> AllPlayers => 
             (HomeTeam?.Players ?? Enumerable.Empty<Player>())
@@ -109,6 +110,7 @@ namespace FootballCommentary.Core.Models
         [Id(4)] public Position Position { get; set; } = new Position();
         [Id(5)] public Dictionary<string, string> AdditionalData { get; set; } = new Dictionary<string, string>();
         [Id(6)] public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+        [Id(7)] public TimeSpan? GameTime { get; set; }
     }
 
     [Immutable]

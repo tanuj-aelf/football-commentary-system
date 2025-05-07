@@ -2,6 +2,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
 using FootballCommentary.Core.Abstractions;
 using FootballCommentary.GAgents.Services;
+using FootballCommentary.GAgents.PlayerAgents;
+using Microsoft.Extensions.Logging;
 
 namespace FootballCommentary.GAgents
 {
@@ -17,6 +19,9 @@ namespace FootballCommentary.GAgents
             
             // Register services
             services.AddSingleton<ILLMService, LLMService>();
+            
+            // Register player agent services - they will be injected into GameStateGAgent
+            services.AddTransient<PlayerAgentManager>();
             
             // The GAgents are automatically registered with Orleans 
             // through the grain interface discovery mechanism

@@ -50,7 +50,7 @@
                             <h3>@teamA: @(gameState?.HomeTeam?.Score ?? 0)</h3>
                         </div>
                         <div class="game-timer scoreboard-timer compact-timer">
-                            <h3>@FormatGameTime(gameState?.GameTime)</h3>
+                            <h3>@FormatGameTime()</h3>
                         </div>
                         <div class="team-score text-end">
                             <h3>@teamB: @(gameState?.AwayTeam?.Score ?? 0)</h3>
@@ -63,7 +63,7 @@
                 </div>
                 
                 <div class="controls">
-                    <button class="btn btn-success" @onclick="StartGame" disabled="@(gameState.Status == GameStatus.InProgress)">Start Game</button>
+                    <button class="btn btn-success" @onclick="StartGame" disabled="@(isGameTimerRunning || gameState.Status == GameStatus.InProgress)">Start Game</button>
                     <button class="btn btn-primary" @onclick="KickBall" disabled="@(gameState.Status != GameStatus.InProgress)">Kick Ball</button>
                     <button class="btn btn-warning" @onclick="@(() => SimulateGoal("TeamA"))" disabled="@(gameState.Status != GameStatus.InProgress)">Goal Team A</button>
                     <button class="btn btn-warning" @onclick="@(() => SimulateGoal("TeamB"))" disabled="@(gameState.Status != GameStatus.InProgress)">Goal Team B</button>
@@ -153,6 +153,13 @@
     private bool hasJoinedGame = false;
     private bool inLobby = true;
     private bool disposedValue = false;
+    
+    // Independent game timer variables
+    private int gameTimeMinutes = 0;
+    private int gameTimeSeconds = 0;
+    private bool isGameTimerRunning = false;
+    private DateTime? gameStartTime;
+    private static readonly TimeSpan GAME_DURATION = TimeSpan.FromMinutes(1.5); // 1.5 minutes in real time = 90 minutes in game time
 
     // Goal scorer class to track stats
     private class GoalScorer
@@ -305,6 +312,30 @@
             StateHasChanged();
         });
 
+        hubConnection.On<string>("GameEnded", (gameId) => 
+        {
+            Console.WriteLine($"[Blazor] GameEnded event received for game {gameId}");
+            
+            // Make sure timer is stopped when game ends but preserve the final time
+            if (isGameTimerRunning)
+            {
+                Console.WriteLine("[Blazor] Stopping game timer on GameEnded event");
+                
+                // If the time is less than 90 minutes, set it to 90:00
+                if (gameTimeMinutes < 90)
+                {
+                    gameTimeMinutes = 90;
+                    gameTimeSeconds = 0;
+                }
+                
+                // Stop the timer without resetting the time
+                isGameTimerRunning = false;
+                gameStartTime = null;
+                
+                StateHasChanged();
+            }
+        });
+
         hubConnection.On<GameEvent>("ReceiveGameEvent", async (gameEvent) => 
         {
             Console.WriteLine($"[Blazor] Received GameEvent: Type={gameEvent.EventType}, Team={gameEvent.TeamId}, PlayerId={gameEvent.PlayerId}");
@@ -312,6 +343,37 @@
             {
                 // Use the reliable GameEvent to update the scorer list
                 await InvokeAsync(() => UpdateGoalScorer(gameEvent));
+            }
+            else if (gameEvent.EventType == GameEventType.GameEnd)
+            {
+                // For GameEnd, save the final time rather than resetting to 0:00 immediately
+                Console.WriteLine("[Blazor] GameEnd event received, preserving final time");
+                await InvokeAsync(() => {
+                    // If the event contains a game time, use it
+                    if (gameEvent.GameTime.HasValue)
+                    {
+                        gameTimeMinutes = (int)Math.Floor(gameEvent.GameTime.Value.TotalMinutes);
+                        gameTimeSeconds = gameEvent.GameTime.Value.Seconds;
+                        // Make sure we show at least 90:00
+                        if (gameTimeMinutes < 90)
+                        {
+                            gameTimeMinutes = 90;
+                            gameTimeSeconds = 0;
+                        }
+                    }
+                    else if (gameTimeMinutes < 90)
+                    {
+                        // Otherwise ensure at least 90:00 is shown
+                        gameTimeMinutes = 90;
+                        gameTimeSeconds = 0;
+                    }
+                    
+                    // Stop the timer but keep the time display
+                    isGameTimerRunning = false;
+                    gameStartTime = null;
+                    
+                    StateHasChanged();
+                });
             }
             // Handle other specific game events if needed (e.g., display foul messages)
         });
@@ -334,6 +396,13 @@
                     Console.WriteLine($"[Blazor] GameStateUpdated event received. Status={state?.Status}, Time={minutes}:{seconds:00}");
                     
                     // Goal scoring events are now handled by the ReceiveGameEvent handler.
+                    
+                    // Check if game has ended and reset timer if needed
+                    if (state?.Status == GameStatus.Ended && isGameTimerRunning)
+                    {
+                        Console.WriteLine("[Blazor] Game ended, stopping and resetting timer");
+                        ResetGameTimer();
+                    }
                     
                     // Debug player positions
                     int homePlayerCount = state?.HomeTeam?.Players?.Count ?? 0;
@@ -559,8 +628,8 @@
         {
             if (gameTimer == null)
             {
-                // Create a timer that updates the UI every second
-                gameTimer = new Timer(250); // 250ms for smoother updates
+                // Create a timer that updates the UI every 100ms
+                gameTimer = new Timer(100); // 100ms for smoother updates
                 gameTimer.Elapsed += OnTimerElapsed;
                 gameTimer.Start();
                 
@@ -571,25 +640,88 @@
 
     private void OnTimerElapsed(object? sender, ElapsedEventArgs e)
     {
-        if (!_isReconnecting && gameState != null)
+        bool needsStateChange = false;
+        
+        // Check if game has ended and stop timer if needed
+        if (gameState?.Status == GameStatus.Ended && isGameTimerRunning)
         {
-            bool needsStateChange = false;
+            Console.WriteLine("[Blazor] Game status is Ended, stopping timer from OnTimerElapsed");
             
-            // Request latest game state if connected, regardless of status
-            if (hubConnection?.State == HubConnectionState.Connected && !string.IsNullOrEmpty(gameId))
+            // If the time is less than 90 minutes, set it to 90:00
+            if (gameTimeMinutes < 90)
             {
-                if (DateTime.Now.Millisecond < 250) // roughly 4 times per second
-                {
-                    _ = hubConnection.InvokeAsync("GetGameState", gameId);
-                    needsStateChange = true;
-                }
+                gameTimeMinutes = 90;
+                gameTimeSeconds = 0;
             }
             
-            // Only call InvokeAsync if we need to update the UI
-            if (needsStateChange) 
+            // Stop the timer without resetting the time
+            isGameTimerRunning = false;
+            gameStartTime = null;
+            
+            needsStateChange = true;
+        }
+        
+        // Prefer using server time if available
+        if (gameState?.GameTime != null && isGameTimerRunning)
+        {
+            // Use the server's game time instead of calculating locally
+            gameTimeMinutes = (int)Math.Floor(gameState.GameTime.TotalMinutes);
+            gameTimeSeconds = gameState.GameTime.Seconds;
+            needsStateChange = true;
+            
+            // If game is still in progress but has reached 90 minutes, don't reset the timer
+            // This keeps showing 90:00 until the server actually ends the game
+            if (gameTimeMinutes >= 90 && gameState.Status == GameStatus.InProgress)
             {
-                 InvokeAsync(StateHasChanged);
+                gameTimeMinutes = 90;
+                gameTimeSeconds = 0;
+                needsStateChange = true;
             }
+        }
+        // Fallback to local timer only if server time is not available
+        else if (isGameTimerRunning && gameStartTime.HasValue)
+        {
+            TimeSpan elapsed = DateTime.Now - gameStartTime.Value;
+            
+            // Convert elapsed real time to game minutes (0-90)
+            double totalGameMinutes = elapsed.TotalSeconds / GAME_DURATION.TotalSeconds * 90;
+            
+            // Cap at 90 minutes
+            if (totalGameMinutes > 90)
+            {
+                gameTimeMinutes = 90;
+                gameTimeSeconds = 0;
+            }
+            else
+            {
+                gameTimeMinutes = (int)Math.Floor(totalGameMinutes);
+                gameTimeSeconds = (int)Math.Floor((totalGameMinutes - gameTimeMinutes) * 60);
+            }
+            
+            needsStateChange = true;
+            
+            // Only end the game if we've reached 90 minutes AND the game is still in progress
+            if (totalGameMinutes >= 90 && gameState?.Status == GameStatus.InProgress && hubConnection?.State == HubConnectionState.Connected)
+            {
+                Console.WriteLine("[Blazor] Client timer reached 90 minutes, ending game");
+                _ = EndGame(); // Don't await here to avoid blocking the timer
+            }
+        }
+            
+        // Request latest game state if connected, regardless of status
+        if (!_isReconnecting && hubConnection?.State == HubConnectionState.Connected && !string.IsNullOrEmpty(gameId))
+        {
+            if (DateTime.Now.Millisecond < 250) // roughly 4 times per second
+            {
+                _ = hubConnection.InvokeAsync("GetGameState", gameId);
+                needsStateChange = true;
+            }
+        }
+        
+        // Only call InvokeAsync if we need to update the UI
+        if (needsStateChange) 
+        {
+             InvokeAsync(StateHasChanged);
         }
     }
 
@@ -605,6 +737,9 @@
         {
             isCreating = true;
             Console.WriteLine($"Creating game between {teamA} and {teamB}");
+            
+            // Reset game timer
+            ResetGameTimer();
             
             // Call the CreateGame method on the hub and get the game ID directly
             gameId = await hubConnection.InvokeAsync<string>("CreateGame", teamA, teamB);
@@ -687,6 +822,10 @@
         {
             try
             {
+                // Start the independent game timer
+                StartGameTimer();
+                
+                // Start the actual game on the server
                 await hubConnection.SendAsync("StartGame", gameId);
             }
             catch (Exception ex)
@@ -702,6 +841,9 @@
         {
             try
             {
+                // Stop the independent game timer
+                StopGameTimer();
+                
                 await hubConnection.SendAsync("EndGame", gameId);
             }
             catch (Exception ex)
@@ -848,6 +990,9 @@
                 commentaryMessages.Add(new CommentaryMessage { Text = $"Left game {gameId}", Timestamp = DateTime.UtcNow });
             }
             
+            // Reset game timer
+            ResetGameTimer();
+            
             gameId = string.Empty;
             inLobby = true;
             hasJoinedGame = false;
@@ -878,6 +1023,9 @@
         {
             disposedValue = true;
 
+            // Reset game timer
+            ResetGameTimer();
+            
             // Stop game timer
             gameTimer?.Stop();
             gameTimer?.Dispose();
@@ -930,6 +1078,12 @@
         }
     }
 
+    private string FormatGameTime()
+    {
+        // Return the independently tracked game time
+        return $"{gameTimeMinutes}:{gameTimeSeconds:D2}";
+    }
+
     private string FormatGameTime(TimeSpan? gameTime)
     {
         if (gameTime == null) return "0:00";
@@ -978,5 +1132,27 @@
         
         // Force UI update
         StateHasChanged();
+    }
+
+    // Game timer methods
+    private void StartGameTimer()
+    {
+        gameStartTime = DateTime.Now;
+        isGameTimerRunning = true;
+        gameTimeMinutes = 0;
+        gameTimeSeconds = 0;
+    }
+    
+    private void StopGameTimer()
+    {
+        isGameTimerRunning = false;
+    }
+    
+    private void ResetGameTimer()
+    {
+        isGameTimerRunning = false;
+        gameTimeMinutes = 0;
+        gameTimeSeconds = 0;
+        gameStartTime = null;
     }
 } 
