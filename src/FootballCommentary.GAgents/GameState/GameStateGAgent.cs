@@ -82,7 +82,7 @@ namespace FootballCommentary.GAgents.GameState
         private const double DEFENSE_ZONE = 0.3;
         private const double MIDFIELD_ZONE = 0.6;
         private const double ATTACK_ZONE = 0.7;
-        private const double TEAMMATE_AVOIDANCE_DISTANCE = 0.08;
+        private const double TEAMMATE_AVOIDANCE_DISTANCE = 0.15; // Increased from 0.08 to match MIN_TEAMMATE_DISTANCE
         private const double OPPONENT_AWARENESS_DISTANCE = 0.15;
         
         // List to track recent tackle attempts
@@ -94,7 +94,7 @@ namespace FootballCommentary.GAgents.GameState
         private const double BASE_TACKLE_CHANCE = 0.15; // Reduced from 0.2 to make tackles even less successful
         
         // Add a new constant for loose ball attraction
-        private const double LOOSE_BALL_ATTRACTION = 0.12; // Increased from 0.09 - players even more attracted to loose balls
+        private const double LOOSE_BALL_ATTRACTION = 0.09; // Decreased from 0.12 to reduce clustering around loose balls
         
         // These constants need to be defined at class level
         private const double GOAL_X_MIN = 0.45;
@@ -1435,15 +1435,17 @@ namespace FootballCommentary.GAgents.GameState
                 return;
             }
             
-            // Determine position on field and if ball is in own half
+            // Determine position on field
             double forwardDirection = isTeamA ? 1 : -1;
             double playerX = player.Position.X;
-            // bool inDefensiveHalf = (isTeamA && playerX < 0.5) || (!isTeamA && playerX > 0.5);
-            // bool inOffensiveHalf = !inDefensiveHalf;
-            // bool inAttackingThird = (isTeamA && playerX > 0.7) || (!isTeamA && playerX < 0.3);
-
+            bool inDefensiveHalf = (isTeamA && playerX < 0.5) || (!isTeamA && playerX > 0.5);
+            bool inOffensiveHalf = !inDefensiveHalf;
+            
             // Check if the ball is in the team's own defensive half
             bool ballInOwnDefensiveHalf = (isTeamA && game.Ball.Position.X < 0.5) || (!isTeamA && game.Ball.Position.X > 0.5);
+            
+            // Check if player is far into the attacking half
+            bool deepInAttackingHalf = (isTeamA && playerX > 0.75) || (!isTeamA && playerX < 0.25);
             
             // Variables for movement calculation
             double dx = 0;
@@ -1455,6 +1457,69 @@ namespace FootballCommentary.GAgents.GameState
                                     (isTeamA && possessorId.StartsWith("TeamA")) || 
                                     (!isTeamA && possessorId.StartsWith("TeamB"));
             
+            // NEW: Count players in attacking half to implement team shape discipline
+            int teamPlayersInAttackingHalf = 0;
+            var teamPlayers = isTeamA ? game.HomeTeam.Players : game.AwayTeam.Players;
+            foreach (var teammate in teamPlayers)
+            {
+                bool teammateInAttackingHalf = (isTeamA && teammate.Position.X > 0.5) || 
+                                  (!isTeamA && teammate.Position.X < 0.5);
+                if (teammateInAttackingHalf)
+                {
+                    teamPlayersInAttackingHalf++;
+                }
+            }
+            
+            // NEW: Define strict maximum forward positions by role
+            double maxForwardPosition;
+            if (isDefender) {
+                maxForwardPosition = isTeamA ? 0.55 : 0.45; // Defenders barely cross midfield
+                // Even stricter if too many players forward already
+                if (teamPlayersInAttackingHalf > 5) {
+                    maxForwardPosition = isTeamA ? 0.45 : 0.55; // Keep defenders in own half
+                }
+            } else if (isMidfielder) {
+                // Holding midfielders (6, 8) are more restricted than attacking midfielders (7, 9)
+                if (playerNumber == 6 || playerNumber == 8) {
+                    maxForwardPosition = isTeamA ? 0.65 : 0.35; // Holding midfielders
+                    if (teamPlayersInAttackingHalf > 5) {
+                        maxForwardPosition = isTeamA ? 0.55 : 0.45; // More restrictive when too many forward
+                    }
+                } else {
+                    maxForwardPosition = isTeamA ? 0.8 : 0.2; // Attacking midfielders
+                    if (teamPlayersInAttackingHalf > 6) {
+                        maxForwardPosition = isTeamA ? 0.7 : 0.3; // Still restrict if too many forward
+                    }
+                }
+            } else {
+                // Forwards
+                maxForwardPosition = isTeamA ? 0.95 : 0.05; // Can go all the way
+            }
+            
+            // NEW: Enforce position discipline FIRST before any other movement calculations
+            // If player is too far forward beyond allowed position, strong retreat force
+            if ((isTeamA && playerX > maxForwardPosition) || (!isTeamA && playerX < maxForwardPosition)) {
+                // Calculate retreat target slightly behind max position
+                double retreatTargetX = isTeamA ? maxForwardPosition - 0.05 : maxForwardPosition + 0.05;
+                
+                // Very strong retreat force - overrides other movement incentives
+                double retreatForce = 0.05; // Strong absolute force value
+                dx = isTeamA ? -retreatForce : retreatForce;
+                
+                // Also pull toward base position Y to maintain team shape
+                dy = (basePosition.Y - player.Position.Y) * 0.03;
+                
+                _logger.LogDebug("ENFORCING RETREAT: Player {PlayerId} ({Role}) forced to retreat from {Position} to max allowed {MaxPos}",
+                    player.PlayerId, isDefender ? "Defender" : isMidfielder ? "Midfielder" : "Forward", playerX, maxForwardPosition);
+                
+                // Apply movement with boundary checking
+                player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+                player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
+                
+                // Skip other movement calculations for this player since retreat takes priority
+                return;
+            }
+            
             // If ball possessor exists and is from same team
             if (playerWithBall != null && teamHasPossession)
             {
@@ -1463,115 +1528,112 @@ namespace FootballCommentary.GAgents.GameState
                 // Movement behaviors based on player role and field position
                 if (isDefender)
                 {
-                    // Defenders maintain strong adherence to base position, especially if ball is in own half
-                    double formationAdherenceMultiplier = ballInOwnDefensiveHalf ? 3.5 : 2.5;
-                    dx += (basePosition.X - player.Position.X) * (FORMATION_ADHERENCE * formationAdherenceMultiplier);
-                    dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * (formationAdherenceMultiplier - 0.5));
-
-                    if (ballInOwnDefensiveHalf)
-                    {
-                        // If ball in own half, defenders stay very disciplined
-                        dx += forwardDirection * PLAYER_SPEED * 0.1; // Minimal forward push
-                    }
-                    else // Ball in opponent's half
-                    {
-                        // Defenders move forward cautiously in offensive half
-                        dx += forwardDirection * PLAYER_SPEED * 0.5;
-                        // Make supporting runs, but don't go too far forward
-                        if (playerWithBall != null && distToBallPossessor > 0.2)
-                        {
-                            dx += (playerWithBall.Position.X - player.Position.X) * 0.02;
-                            dy += (playerWithBall.Position.Y - player.Position.Y) * 0.03;
-                        }
+                    // Defenders should generally stay back, regardless of possession
+                    double defensivePositionX = isTeamA ? 0.25 : 0.75; // More conservative defensive position
+                    
+                    // Stronger formation adherence for defenders
+                    double formationAdherenceMultiplier = 3.0; // Increased from 2.5
+                    
+                    // Different behavior based on ball position
+                    if (ballInOwnDefensiveHalf) {
+                        // Ball in own half - defenders stay deep and provide cover
+                        dx += (defensivePositionX - player.Position.X) * (FORMATION_ADHERENCE * formationAdherenceMultiplier * 1.5);
+                        dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * formationAdherenceMultiplier);
+                    } else {
+                        // Ball in opponent half - maintain defensive line at or near midfield
+                        double defensiveLineX = isTeamA ? 0.45 : 0.55; // Just behind midfield
+                        
+                        // Extremely strong pull to defensive line
+                        dx += (defensiveLineX - player.Position.X) * (FORMATION_ADHERENCE * formationAdherenceMultiplier * 2.0);
+                        dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * formationAdherenceMultiplier);
                     }
                 }
                 else if (isMidfielder)
                 {
-                    // Midfielders: More conservative if ball is in own defensive half
+                    // Midfielders: More balanced between attack and defense
+                    // Differentiate between holding midfielders (6, 8) and attacking midfielders (7, 9)
+                    bool isHoldingMidfielder = (playerNumber == 6 || playerNumber == 8);
+                    
                     if (ballInOwnDefensiveHalf)
                     {
-                        dx += (basePosition.X - player.Position.X) * (FORMATION_ADHERENCE * 2.5); // Stronger pull to base
-                        dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.0);
-                        dx += forwardDirection * PLAYER_SPEED * 0.3; // Less aggressive forward movement
-                        
-                        // Get a bit closer to ball possessor for support if they are also in own half
-                        if (playerWithBall != null && distToBallPossessor > 0.15 && ((isTeamA && playerWithBall.Position.X < 0.5) || (!isTeamA && playerWithBall.Position.X > 0.5)))
-                        {
-                            dx += (playerWithBall.Position.X - player.Position.X) * 0.025;
-                            dy += (playerWithBall.Position.Y - player.Position.Y) * 0.025;
+                        // When ball is in own half, midfielders provide closer support
+                        // Holding midfielders stay deeper
+                        if (isHoldingMidfielder) {
+                            double supportPositionX = isTeamA ? 0.35 : 0.65; // Deeper support position
+                            dx += (supportPositionX - player.Position.X) * (FORMATION_ADHERENCE * 3.0);
+                            dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.0);
+                        } else {
+                            // Attacking midfielders provide support but can be slightly higher
+                            double supportPositionX = isTeamA ? 0.45 : 0.55; // Higher support position
+                            dx += (supportPositionX - player.Position.X) * (FORMATION_ADHERENCE * 2.5);
+                            dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.5);
+                            
+                            // Move toward ball possessor for support
+                            if (distToBallPossessor > 0.15) {
+                                dx += (playerWithBall.Position.X - player.Position.X) * 0.02;
+                                dy += (playerWithBall.Position.Y - player.Position.Y) * 0.03;
+                            }
                         }
                     }
-                    else // Ball in opponent's half, midfielders can be more aggressive
+                    else // Ball in opponent's half
                     {
-                        dx += (basePosition.X - player.Position.X) * (FORMATION_ADHERENCE * 1.5);
-                        dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.0);
-                        dx += forwardDirection * PLAYER_SPEED * 0.9; // More aggressive forward movement
-                        // Make supporting runs, creating passing options (existing aggressive logic)
-                        if (playerWithBall != null)
-                        {
-                            // ... (keep existing aggressive run logic for when ball is in opponent half)
-                            if (isTeamA)
-                            {
-                                bool isAheadOfBall = player.Position.X > playerWithBall.Position.X;
-                                if (isAheadOfBall)
-                                {
-                                    dx += PLAYER_SPEED * 0.5; 
-                                    if (player.Position.Y < 0.4 || player.Position.Y > 0.6) dy += (0.5 - player.Position.Y) * 0.04;
-                                }
-                                else { dx += PLAYER_SPEED * 0.8; }
-                            }
-                            else // Team B
-                            {
-                                bool isAheadOfBall = player.Position.X < playerWithBall.Position.X;
-                                if (isAheadOfBall)
-                                {
-                                    dx -= PLAYER_SPEED * 0.5;
-                                    if (player.Position.Y < 0.4 || player.Position.Y > 0.6) dy += (0.5 - player.Position.Y) * 0.04;
-                                }
-                                else { dx -= PLAYER_SPEED * 0.8; }
-                            }
+                        // Check if we already have too many players in attacking half
+                        if (teamPlayersInAttackingHalf > 6 && isHoldingMidfielder) {
+                            // One holding midfielder should always stay back for balance
+                            double balancePositionX = isTeamA ? 0.45 : 0.55; // Just behind midfield
+                            dx += (balancePositionX - player.Position.X) * (FORMATION_ADHERENCE * 3.0);
+                            dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.0);
+                            
+                            _logger.LogDebug("Holding midfielder {PlayerId} maintaining balance as too many players forward", player.PlayerId);
+                        } else {
+                            // Midfielder can move forward with more freedom, but still with position discipline
+                            double forwardPositionX = isTeamA ? 
+                                Math.Min(playerWithBall.Position.X + 0.1, maxForwardPosition) : 
+                                Math.Max(playerWithBall.Position.X - 0.1, maxForwardPosition);
+                            
+                            // More moderate forward movement to maintain balance
+                            dx += (forwardPositionX - player.Position.X) * (FORMATION_ADHERENCE * 1.5);
+                            // Keep width position based on role
+                            dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.0);
                         }
                     }
                 }
                 else if (isForward)
                 {
-                    // Forwards: Much more conservative if ball is in own defensive half
+                    // Forwards: Most aggressive attacking movement
                     if (ballInOwnDefensiveHalf)
                     {
-                        dx += (basePosition.X - player.Position.X) * (FORMATION_ADHERENCE * 2.0); // Strong pull to base/midfield
-                        dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.5);
-                        dx += forwardDirection * PLAYER_SPEED * 0.2; // Very little forward drift
+                        // If ball is in own half, forwards drop deeper to provide options
+                        double supportPositionX = isTeamA ? 0.5 : 0.5; // At midfield line
+                        dx += (supportPositionX - player.Position.X) * (FORMATION_ADHERENCE * 1.5);
+                        dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.2);
                     }
-                    else // Ball in opponent's half, forwards are aggressive
+                    else // Ball in opponent's half
                     {
-                        dx += (basePosition.X - player.Position.X) * (FORMATION_ADHERENCE * 1.0);
-                        dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 0.8);
-                        dx += forwardDirection * PLAYER_SPEED * 1.2; // Aggressive runs
-                        // ... (keep existing aggressive run logic for when ball is in opponent half)
-                        bool inAttackingThird = (isTeamA && player.Position.X > 0.7) || (!isTeamA && player.Position.X < 0.3);
-                        if (inAttackingThird)
-                        {
-                            double goalY = 0.5;
-                            double goalPostX = isTeamA ? 0.95 : 0.05;
-                            dx += (goalPostX - player.Position.X) * 0.06;
-                            dy += (goalY - player.Position.Y) * 0.05;
-                            if (_random.NextDouble() < 0.2) dy += (_random.NextDouble() - 0.5) * 0.1;
+                        // Aggressive attacking runs, but still maintain some structure
+                        
+                        // Stagger forwards - not all forwards should push highest line
+                        if (playerNumber == 10) { // First forward stays slightly deeper
+                            double forwardPositionX = isTeamA ? 0.8 : 0.2; 
+                            dx += (forwardPositionX - player.Position.X) * (FORMATION_ADHERENCE * 1.2);
+                        } else { // Second forward can push highest line
+                            double forwardPositionX = isTeamA ? 0.9 : 0.1;
+                            dx += (forwardPositionX - player.Position.X) * (FORMATION_ADHERENCE * 1.0);
                         }
-                        else
-                        {
-                            if (playerWithBall != null)
-                            {
-                                if ((isTeamA && player.Position.X <= playerWithBall.Position.X) || 
-                                    (!isTeamA && player.Position.X >= playerWithBall.Position.X))
-                                {
-                                    dx += forwardDirection * PLAYER_SPEED * 1.3; 
-                                }
-                                else { dy += (_random.NextDouble() - 0.5) * 0.1; }
-                            }
+                        
+                        // Width based on base position
+                        dy += (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 0.8);
+                        
+                        // Add some randomness for unpredictable forward runs
+                        if (_random.NextDouble() < 0.1) {
+                            dy += (_random.NextDouble() - 0.5) * 0.02;
                         }
                     }
                 }
             }
+            
+            // Apply teammate avoidance to prevent crowding
+            AvoidTeammates(game, player, ref dx, ref dy, player.PlayerId.StartsWith("TeamA"));
             
             // Apply movement with boundary checking
             player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
@@ -1603,6 +1665,62 @@ namespace FootballCommentary.GAgents.GameState
             double naturalMovementX = Math.Sin(game.SimulationStep * 0.05 + phase + Math.PI) * 0.003;
             double naturalMovementY = Math.Cos(game.SimulationStep * 0.04 + phase + Math.PI) * 0.003;
             
+            // NEW: Count players in attacking half for defensive shape coordination
+            int teamPlayersInAttackingHalf = 0;
+            var teamPlayers = isTeamA ? game.HomeTeam.Players : game.AwayTeam.Players;
+            foreach (var teammate in teamPlayers)
+            {
+                bool teammateInAttackingHalf = (isTeamA && teammate.Position.X > 0.5) || 
+                                  (!isTeamA && teammate.Position.X < 0.5);
+                if (teammateInAttackingHalf)
+                {
+                    teamPlayersInAttackingHalf++;
+                }
+            }
+            
+            // NEW: Define strict maximum forward positions by role for defensive positioning
+            double maxForwardPosition;
+            if (isDefender) {
+                maxForwardPosition = isTeamA ? 0.5 : 0.5; // Defenders at midfield max
+                if (teamPlayersInAttackingHalf > 3) {
+                    maxForwardPosition = isTeamA ? 0.4 : 0.6; // More restrictive when too many forward
+                }
+            } else if (isMidfielder) {
+                // Holding midfielders (6, 8) have different restrictions than attacking midfielders (7, 9)
+                if (playerNumber == 6 || playerNumber == 8) {
+                    maxForwardPosition = isTeamA ? 0.55 : 0.45; // Defensive midfielders
+                } else {
+                    maxForwardPosition = isTeamA ? 0.65 : 0.35; // Attacking midfielders
+                }
+            } else {
+                // Forwards have more freedom but still limited
+                maxForwardPosition = isTeamA ? 0.8 : 0.2;
+            }
+            
+            // NEW: Check if player needs to retreat from beyond max position FIRST
+            bool playerTooFarForward = (isTeamA && player.Position.X > maxForwardPosition) || 
+                                     (!isTeamA && player.Position.X < maxForwardPosition);
+            
+            if (playerTooFarForward && playerWithBall != null) {
+                // Calculate retreat position (behind max forward position)
+                double retreatTargetX = isTeamA ? maxForwardPosition - 0.1 : maxForwardPosition + 0.1;
+                double retreatStrength = FORMATION_ADHERENCE * 5.0; // Very strong retreat force
+                
+                // Strong pull back to defensive position
+                dx = (retreatTargetX - player.Position.X) * retreatStrength;
+                
+                // Maintain Y position based on role
+                dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.0);
+                
+                _logger.LogDebug("DEFENSIVE RETREAT: Player {PlayerId} ({Role}) forced to retreat defensively from {Position}",
+                    player.PlayerId, isDefender ? "Defender" : isMidfielder ? "Midfielder" : "Forward", player.Position.X);
+                
+                // Apply the retreat move and skip other calculations
+                player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+                player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
+                return;
+            }
+            
             // First check if ball is loose and player should go for it
             if (string.IsNullOrEmpty(game.BallPossession) && game.Ball != null)
             {
@@ -1620,24 +1738,40 @@ namespace FootballCommentary.GAgents.GameState
                 // Find this player's rank in distance to ball
                 int myRank = allPlayers.FindIndex(p => p.PlayerId == player.PlayerId);
                 
-                // If this player is among the closest to the ball, go for it with higher priority
-                if (myRank < 3 || distToBall < 0.15)
+                // NEW: Check if player should go for ball based on tactical position
+                bool shouldGoForBall = false;
+                
+                // Only the closest 2 players should go for loose balls, unless the ball is in our defensive third
+                bool ballInDefensiveThird = (isTeamA && game.Ball.Position.X < 0.3) || 
+                                          (!isTeamA && game.Ball.Position.X > 0.7);
+                
+                // Loose ball in our defensive third - more players can go for it
+                if (ballInDefensiveThird && distToBall < 0.2) {
+                    shouldGoForBall = myRank < 4; // Up to 4 players can go for it in defensive third
+                }
+                // Loose ball elsewhere - fewer players should go for it to maintain shape
+                else if (distToBall < 0.15) {
+                    shouldGoForBall = myRank < 2; // Only 2 closest players go for it
+                }
+                
+                // If player should go for loose ball
+                if (shouldGoForBall)
                 {
-                    double ballAttractionStrength = LOOSE_BALL_ATTRACTION * 1.2; // Slightly higher when opponent doesn't have ball
+                    double ballAttractionStrength = LOOSE_BALL_ATTRACTION;
                     
                     // Adjust attraction based on distance - closer players are more attracted
-                    ballAttractionStrength *= (1.0 - Math.Min(distToBall, 0.3) / 0.3) * 2.0;
+                    ballAttractionStrength *= (1.0 - Math.Min(distToBall, 0.3) / 0.3) * 1.7;
                     
                     // Adjust attraction based on player role and field position
                     bool isLooseBallInOurHalf = (isTeamA && game.Ball.Position.X < 0.5) || (!isTeamA && game.Ball.Position.X > 0.5);
                     
                     if (isDefender && isLooseBallInOurHalf) ballAttractionStrength *= 1.8; // Defenders prioritize ball in our half
-                    else if (isDefender) ballAttractionStrength *= 0.7; // Defenders less interested in opponent half
+                    else if (isDefender) ballAttractionStrength *= 0.6; // Defenders less interested in opponent half
                     
-                    if (isMidfielder) ballAttractionStrength *= 1.3; // Midfielders generally go for ball
+                    if (isMidfielder) ballAttractionStrength *= 1.2; // Midfielders generally go for ball
                     
-                    if (isForward && !isLooseBallInOurHalf) ballAttractionStrength *= 1.3; // Forwards more interested in opponent half
-                    else if (isForward) ballAttractionStrength *= 0.7; // Forwards less interested in our half
+                    if (isForward && !isLooseBallInOurHalf) ballAttractionStrength *= 1.1; // Forwards more interested in opponent half
+                    else if (isForward) ballAttractionStrength *= 0.6; // Forwards less interested in our half
                     
                     // Move toward ball
                     dx += (game.Ball.Position.X - player.Position.X) * ballAttractionStrength;
@@ -1647,7 +1781,7 @@ namespace FootballCommentary.GAgents.GameState
                     dx += (_random.NextDouble() - 0.5) * 0.01;
                     dy += (_random.NextDouble() - 0.5) * 0.01;
                     
-                    // Return early if going for the loose ball, overriding normal defensive behavior
+                    // Apply movement with boundary checking
                     player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
                     player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
                     return;
@@ -1664,33 +1798,35 @@ namespace FootballCommentary.GAgents.GameState
             if (playerInOpponentHalf && playerWithBall != null) {
                 // Calculate retreat position (slightly behind midfield)
                 double retreatTargetX = isTeamA ? 0.45 : 0.55;
-                double retreatStrength = FORMATION_ADHERENCE * 3.5; // Much stronger retreat force (was 2.0-2.5)
+                double retreatStrength = FORMATION_ADHERENCE * 4.0; // Increased from 3.5
                 
                 // Apply retreat force based on player role (all stronger now)
                 if (isDefender) {
                     // Defenders retreat most urgently to their defensive positions
-                    retreatStrength *= 1.5;
+                    retreatStrength *= 1.8; // Increased from 1.5
                     retreatTargetX = isTeamA ? 0.35 : 0.65; // Deeper position for defenders
                 } else if (isMidfielder) {
                     // Midfielders retreat to midfield
-                    retreatStrength *= 1.3;
+                    retreatStrength *= 1.5; // Increased from 1.3
                 } else if (isForward) {
                     // Even forwards retreat, but not as deep
-                    retreatStrength *= 1.1; 
+                    retreatStrength *= 1.2; // Increased from 1.1
                 }
                 
                 // Strong pull back to own half
                 dx = (retreatTargetX - player.Position.X) * retreatStrength;
                 
                 // Maintain some of the Y position relative to base position
-                dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.5);
+                dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.0); // Increased from 1.5
                 
                 // Add natural movements and continue to the normal positioning logic with reduced effect
                 dx += naturalMovementX;
                 dy += naturalMovementY;
                 
-                // Log the retreat behavior
-                _logger.LogDebug("Player {PlayerId} retreating from opponent's half", player.PlayerId);
+                // Apply movement with boundary checking
+                player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+                player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
+                return; // Skip other calculations since retreat takes priority
             }
             
             // Check if ball is in player's team's defensive half (indicating a direct threat)
@@ -1699,186 +1835,188 @@ namespace FootballCommentary.GAgents.GameState
             // Defensive positioning based on player role
             if (isGoalkeeper) {
                 // Goalkeeper stays near the goal, with slight adjustment based on ball position
-                dx = (basePosition.X - player.Position.X) * (FORMATION_ADHERENCE * 7.0); // Stronger pull
+                dx = (basePosition.X - player.Position.X) * (FORMATION_ADHERENCE * 7.0);
                 
                 // Goalkeepers adjust Y position based on ball position, but limited movement
                 double targetY = 0.5 + (targetPos.Y - 0.5) * 0.5; // Move toward ball's Y position, but only 50%
                 targetY = Math.Clamp(targetY, 0.3, 0.7); // Limit keeper's range
-                dy = (targetY - player.Position.Y) * (FORMATION_ADHERENCE * 3.0); // Stronger pull
+                dy = (targetY - player.Position.Y) * (FORMATION_ADHERENCE * 3.0);
+                
+                // Apply natural movements for slight variation
+                dx += naturalMovementX * 0.5;
+                dy += naturalMovementY * 0.5;
             }
             else if (isDefender) {
-                // Skip if already handling retreat
-                if (!playerInOpponentHalf) {
-                    // Defenders focus on maintaining defensive shape and position
-                    // Stronger pull towards base position for defenders
-                    dx = (basePosition.X - player.Position.X) * (FORMATION_ADHERENCE * 3.0); // Increased from 2.5
-                    dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.0);
+                // Defenders focus on maintaining defensive shape and marking
+                if (ballThreateningOwnGoal) {
+                    // When ball is threatening our goal, defenders drop deeper
+                    double defensivePositionX = isTeamA ? 0.2 : 0.8; // Deeper defensive position
+                    dx = (defensivePositionX - player.Position.X) * (FORMATION_ADHERENCE * 4.0); // Increased pull
                     
-                    // Add more natural movement with increased randomness for defenders
-                    dx += naturalMovementX * 1.2;
-                    dy += naturalMovementY * 1.2;
+                    // Shift toward ball side but maintain defensive line
+                    double ballSideShift = (targetPos.Y - 0.5) * 0.4; // Shift 40% toward ball's side
+                    double targetY = basePosition.Y + ballSideShift;
+                    targetY = Math.Clamp(targetY, 0.2, 0.8); // Ensure not too wide
+                    dy = (targetY - player.Position.Y) * (FORMATION_ADHERENCE * 3.0);
                     
-                    // Add additional random movement for defenders to make them less predictable
-                    dx += (_random.NextDouble() - 0.5) * 0.01;
-                    dy += (_random.NextDouble() - 0.5) * 0.01;
-                    
-                    // Defenders shift slightly toward ball side
-                    double ballSideShift = (targetPos.Y - 0.5) * 0.3; // Shift 30% toward ball's side
-                    dy += ballSideShift * PLAYER_SPEED * 0.2;
-                }
-                
-                // Only nearest defender actively approaches ball carrier
-                if (playerWithBall != null) {
-                    double distanceToTarget = Math.Sqrt(
-                        Math.Pow(player.Position.X - targetPos.X, 2) +
-                        Math.Pow(player.Position.Y - targetPos.Y, 2));
-                    
-                    // Defensive third is where defenders become active
-                    bool ballInDefensiveThird = (isTeamA && targetPos.X < 0.4) || 
-                                              (!isTeamA && targetPos.X > 0.6);
-                              
-                    // Find if this is the closest defender
-                    bool isClosestDefender = false;
-                    var teammates = isTeamA ? game.HomeTeam.Players : game.AwayTeam.Players;
-                    var otherDefenders = teammates
-                        .Where(p => {
-                            // Get other player's number 
-                            int otherNum = TryParsePlayerId(p.PlayerId) ?? 0;
-                            otherNum += 1;
-                            return p.PlayerId != player.PlayerId && otherNum >= 2 && otherNum <= 5;
-                        })
-                        .ToList();
+                    // Only nearest defender actively approaches ball carrier
+                    if (playerWithBall != null) {
+                        double distanceToTarget = Math.Sqrt(
+                            Math.Pow(player.Position.X - targetPos.X, 2) +
+                            Math.Pow(player.Position.Y - targetPos.Y, 2));
                         
-                    // Calculate distances for all defenders
-                    var defenderDistances = otherDefenders
-                        .Select(p => Math.Sqrt(
-                            Math.Pow(p.Position.X - targetPos.X, 2) +
-                            Math.Pow(p.Position.Y - targetPos.Y, 2)))
-                        .ToList();
+                        // Find if this is the closest defender
+                        var otherDefenders = teamPlayers
+                            .Where(p => {
+                                int otherNum = TryParsePlayerId(p.PlayerId) ?? 0;
+                                otherNum += 1;
+                                return p.PlayerId != player.PlayerId && otherNum >= 2 && otherNum <= 5;
+                            });
                         
-                    // Am I the closest defender?
-                    isClosestDefender = !defenderDistances.Any(d => d < distanceToTarget);
+                        bool isClosestDefender = !otherDefenders.Any(p => 
+                            CalculateDistance(p.Position, targetPos) < distanceToTarget);
                         
-                    if (ballInDefensiveThird && (isClosestDefender || distanceToTarget < 0.15)) {
-                        // Defensive pressure, but with reduced effectiveness
-                        double pressureFactor = PLAYER_SPEED * 0.7;
-                        dx += (targetPos.X - player.Position.X) * pressureFactor;
-                        dy += (targetPos.Y - player.Position.Y) * pressureFactor;
-                        
-                        // Occasionally make defensive errors (10% chance)
-                        if (_random.NextDouble() < 0.1) {
-                            // Random movement instead of proper defending
-                            double errorX = (_random.NextDouble() - 0.5) * 0.03;
-                            double errorY = (_random.NextDouble() - 0.5) * 0.03;
-                            
-                            // Replace calculated movement with error movement
-                            dx = errorX;
-                            dy = errorY;
+                        if (isClosestDefender && distanceToTarget < 0.15) {
+                            // Adjust movement to close down attacker
+                            dx = (targetPos.X - player.Position.X) * 0.05;
+                            dy = (targetPos.Y - player.Position.Y) * 0.05;
                         }
                     }
                 }
+                else {
+                    // Ball not directly threatening - maintain defensive shape with more compactness
+                    double defensiveLineX;
+                    if (ballInDefensiveHalf) {
+                        // Ball in our half - defenders drop a bit deeper
+                        defensiveLineX = isTeamA ? 0.3 : 0.7;
+                    } else {
+                        // Ball in opponent half - defenders push to midfield
+                        defensiveLineX = isTeamA ? 0.4 : 0.6;
+                    }
+                    
+                    // Strong pull toward defensive line
+                    dx = (defensiveLineX - player.Position.X) * (FORMATION_ADHERENCE * 3.5);
+                    
+                    // Maintain horizontal spacing based on formation role
+                    dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.5);
+                    
+                    // Shift slightly toward ball side to maintain defensive compactness
+                    double ballSideShift = (targetPos.Y - 0.5) * 0.3;
+                    dy += ballSideShift * 0.02;
+                }
+                
+                // Add natural movement for defenders
+                dx += naturalMovementX;
+                dy += naturalMovementY;
             }
             else if (isMidfielder) {
-                // Skip if already handling retreat from opponent half
-                if (!playerInOpponentHalf) {
-                    // Midfielders: Stronger retreat if ball is threatening own goal
-                    if (ballThreateningOwnGoal)
-                    {
-                        // Retreat towards a more defensive midfield position or own half
-                        double retreatTargetX = isTeamA ? 0.35 : 0.65; // More defensive position than before
-                        dx = (retreatTargetX - player.Position.X) * (FORMATION_ADHERENCE * 3.0); // Increased from 2.5
-                        dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.0);
-                        _logger.LogDebug("Midfielder {PlayerId} retreating as ball is threatening.", player.PlayerId);
-                    }
-                    else // Ball not directly threatening, maintain shape, slight pressure
-                    {
-                        dx = (basePosition.X - player.Position.X) * (FORMATION_ADHERENCE * 2.5); // Increased from 2.0
-                        dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.5);
-                    }
+                bool isHoldingMidfielder = (playerNumber == 6 || playerNumber == 8);
+                
+                // Midfielders - balance between pressing and defensive shape
+                if (ballThreateningOwnGoal) {
+                    // Ball threatening goal - midfielders drop to help defense
+                    double supportPositionX = isTeamA ? 0.3 : 0.7; // Deep support position
+                    dx = (supportPositionX - player.Position.X) * (FORMATION_ADHERENCE * 3.5);
                     
-                    // Add more natural movement
-                    dx += naturalMovementX * 1.5;
-                    dy += naturalMovementY * 1.5;
+                    // Holding midfielders tighter to center, wide midfielders maintain width
+                    double supportYFactor = isHoldingMidfielder ? 0.8 : 0.5;
+                    double targetY = 0.5 + (basePosition.Y - 0.5) * supportYFactor;
+                    dy = (targetY - player.Position.Y) * (FORMATION_ADHERENCE * 2.5);
                     
-                    // Slight shift toward ball
-                    double ballSideShift = (targetPos.Y - 0.5) * 0.4; // Shift 40% toward ball's side
-                    dy += ballSideShift * PLAYER_SPEED * 0.3;
+                    _logger.LogDebug("Midfielder {PlayerId} dropping deep as ball is threatening", player.PlayerId);
                 }
-                
-                // Middle third is where midfielders are most active
-                bool ballInMiddleThird = (targetPos.X >= 0.3 && targetPos.X <= 0.7);
-                
-                if (playerWithBall != null && ballInMiddleThird) {
-                    // Get distance to ball
-                    double distanceToTarget = Math.Sqrt(
-                        Math.Pow(player.Position.X - targetPos.X, 2) +
-                        Math.Pow(player.Position.Y - targetPos.Y, 2));
+                else if (ballInDefensiveHalf) {
+                    // Ball in our half but not threatening - midfielders form compact block
+                    double blockPositionX = isTeamA ? 0.4 : 0.6; // Form midfield block
+                    dx = (blockPositionX - player.Position.X) * (FORMATION_ADHERENCE * 3.0);
+                    
+                    // Get compact horizontally but maintain lanes
+                    double compactYFactor = 0.7; // Bring slightly toward center from base position
+                    double targetY = 0.5 + (basePosition.Y - 0.5) * compactYFactor;
+                    dy = (targetY - player.Position.Y) * (FORMATION_ADHERENCE * 2.0);
+                    
+                    // Holding midfielders track nearest opponent
+                    if (isHoldingMidfielder && playerWithBall != null) {
+                        double distanceToTarget = Math.Sqrt(
+                            Math.Pow(player.Position.X - targetPos.X, 2) +
+                            Math.Pow(player.Position.Y - targetPos.Y, 2));
                         
-                    // Midfielder pressing - more active but selective
-                    if (distanceToTarget < 0.2 && playerNumber % 2 == 0) { // Only some midfielders press
-                        double pressureFactor = PLAYER_SPEED * 0.7;
-                        dx += (targetPos.X - player.Position.X) * pressureFactor;
-                        dy += (targetPos.Y - player.Position.Y) * pressureFactor;
+                        if (distanceToTarget < 0.2) {
+                            // Move to press/track opponent
+                            dx += (targetPos.X - player.Position.X) * 0.04;
+                            dy += (targetPos.Y - player.Position.Y) * 0.04;
+                        }
                     }
                 }
+                else {
+                    // Ball in opponent half - midfielders push up but maintain balance
+                    double pressPositionX;
+                    if (isHoldingMidfielder) {
+                        // Holding midfielders stay near midfield
+                        pressPositionX = isTeamA ? 0.5 : 0.5;
+                    } else {
+                        // Attacking midfielders push higher to press
+                        pressPositionX = isTeamA ? 0.55 : 0.45;
+                    }
+                    
+                    dx = (pressPositionX - player.Position.X) * (FORMATION_ADHERENCE * 2.5);
+                    dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.8);
+                }
+                
+                // Add natural movement for midfielders
+                dx += naturalMovementX * 1.5;
+                dy += naturalMovementY * 1.5;
             }
             else if (isForward) {
-                // Skip if already handling retreat from opponent half
-                if (!playerInOpponentHalf) {
-                    // Forwards: Stronger retreat if ball is threatening own goal, otherwise hold a higher line
-                    if (ballThreateningOwnGoal)
-                    {
-                        // Retreat towards midfield line
-                        double retreatTargetX = isTeamA ? 0.4 : 0.6; // More defensive position than before
-                        dx = (retreatTargetX - player.Position.X) * (FORMATION_ADHERENCE * 2.5); // Increased from 2.0
-                        dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.5);
-                        _logger.LogDebug("Forward {PlayerId} retreating towards midfield as ball is threatening.", player.PlayerId);
+                // Forwards - first line of defense, pressing and cutting passing lanes
+                
+                // Check if this forward should press or drop based on team tactics
+                bool shouldPress = (playerNumber == 10) || (teamPlayersInAttackingHalf < 3);
+                
+                if (ballInDefensiveHalf) {
+                    // Ball in our half - forwards drop to midfield at most
+                    double dropPositionX = isTeamA ? 0.45 : 0.55; // Drop to midfield
+                    dx = (dropPositionX - player.Position.X) * (FORMATION_ADHERENCE * 2.5);
+                    dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.5);
+                }
+                else {
+                    // Ball in opponent half - press or cut passing lanes
+                    if (shouldPress && playerWithBall != null) {
+                        double distanceToTarget = Math.Sqrt(
+                            Math.Pow(player.Position.X - targetPos.X, 2) +
+                            Math.Pow(player.Position.Y - targetPos.Y, 2));
+                        
+                        if (distanceToTarget < 0.25) { // Within pressing distance
+                            // Press intensely
+                            dx = (targetPos.X - player.Position.X) * 0.08;
+                            dy = (targetPos.Y - player.Position.Y) * 0.08;
+                        } else {
+                            // Position to cut passing lanes
+                            double pressPositionX = isTeamA ? 0.6 : 0.4; // Press position
+                            dx = (pressPositionX - player.Position.X) * (FORMATION_ADHERENCE * 2.0);
+                            
+                            // Position between ball and goal
+                            double interceptY = 0.5 + (targetPos.Y - 0.5) * 0.7;
+                            dy = (interceptY - player.Position.Y) * (FORMATION_ADHERENCE * 1.5);
+                        }
+                    } else {
+                        // Not pressing - maintain higher position to be ready for counter
+                        double counterPositionX = isTeamA ? 0.55 : 0.45; // Just ahead of midfield
+                        dx = (counterPositionX - player.Position.X) * (FORMATION_ADHERENCE * 1.8);
+                        dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 1.2);
                     }
-                    else // Ball not directly threatening, forwards can stay higher up but still maintain shape
-                    {
-                        // Hold position closer to midfield when not attacking
-                        double targetX = isTeamA ? Math.Min(basePosition.X, 0.6) : Math.Max(basePosition.X, 0.4);
-                        dx = (targetX - player.Position.X) * FORMATION_ADHERENCE * 2.0; // Increased from 1.5
-                        dy = (basePosition.Y - player.Position.Y) * FORMATION_ADHERENCE * 1.5; // Increased from 1.2
-                    }
-
-                    // Add more natural movement
-                    dx += naturalMovementX * 2.0;
-                    dy += naturalMovementY * 2.0;
                 }
                 
-                // Forwards stay somewhat forward even when defending, but not too far forward
-                double minPosition = isTeamA ? 0.35 : 0.65; // More conservative than before (was 0.4/0.6)
-                if ((isTeamA && player.Position.X < minPosition) ||
-                    (!isTeamA && player.Position.X > minPosition)) {
-                    // Pull forward to maintain moderate attacking position
-                    double pullFactor = PLAYER_SPEED * 0.4; // Reduced from 0.5 for less aggressive positioning
-                    dx += (isTeamA ? pullFactor : -pullFactor);
-                }
-                
-                // Forwards only press in attacking third
-                bool ballInAttackingThird = (isTeamA && targetPos.X > 0.6) ||
-                                          (!isTeamA && targetPos.X < 0.4);
-                                          
-                // Limited pressing from forwards - only if ball is in attacking third
-                if (playerWithBall != null && ballInAttackingThird) {
-                    double distanceToTarget = Math.Sqrt(
-                       Math.Pow(player.Position.X - targetPos.X, 2) +
-                       Math.Pow(player.Position.Y - targetPos.Y, 2));
-
-                    if (distanceToTarget < 0.15) { // Close enough to press
-                        double pressureFactor = PLAYER_SPEED * 0.6;
-                        dx += (targetPos.X - player.Position.X) * pressureFactor;
-                        dy += (targetPos.Y - player.Position.Y) * pressureFactor;
-                    }
-                }
+                // Add natural movement for forwards
+                dx += naturalMovementX * 2.0;
+                dy += naturalMovementY * 2.0;
             }
             
             // All players: avoid clustering with teammates
             AvoidTeammates(game, player, ref dx, ref dy, isTeamA);
             
             // Small random movement for naturalism - reduced for goalkeepers
-            double randomFactor = isGoalkeeper ? 0.1 : 0.3;
+            double randomFactor = isGoalkeeper ? 0.1 : 0.2; // Reduced from 0.3
             dx += (_random.NextDouble() - 0.5) * PLAYER_SPEED * randomFactor;
             dy += (_random.NextDouble() - 0.5) * PLAYER_SPEED * randomFactor;
 
@@ -1900,7 +2038,7 @@ namespace FootballCommentary.GAgents.GameState
                 : game.AwayTeam.Players.Where(p => p.PlayerId != player.PlayerId);
             
             // Define minimum comfortable distance between teammates
-            const double MIN_TEAMMATE_DISTANCE = 0.1;
+            const double MIN_TEAMMATE_DISTANCE = 0.15; // Increased from 0.1 for better spacing
             
             foreach (var teammate in teammates)
             {
@@ -1913,11 +2051,11 @@ namespace FootballCommentary.GAgents.GameState
                 {
                     // Calculate vector direction away from teammate
                     double avoidanceStrength = (MIN_TEAMMATE_DISTANCE - distToTeammate) / MIN_TEAMMATE_DISTANCE;
-                    avoidanceStrength = Math.Min(avoidanceStrength, 0.5); // Cap the avoidance strength
+                    avoidanceStrength = Math.Min(avoidanceStrength * 1.5, 0.8); // Increased avoidance strength cap from 0.5 to 0.8 and multiplier
                     
                     // Add avoidance force (inversely proportional to distance)
-                    dx += (player.Position.X - teammate.Position.X) * avoidanceStrength * PLAYER_SPEED * 0.8;
-                    dy += (player.Position.Y - teammate.Position.Y) * avoidanceStrength * PLAYER_SPEED * 0.8;
+                    dx += (player.Position.X - teammate.Position.X) * avoidanceStrength * PLAYER_SPEED * 1.2; // Increased multiplier from 0.8 to 1.2
+                    dy += (player.Position.Y - teammate.Position.Y) * avoidanceStrength * PLAYER_SPEED * 1.2; // Increased multiplier from 0.8 to 1.2
                 }
             }
         }
