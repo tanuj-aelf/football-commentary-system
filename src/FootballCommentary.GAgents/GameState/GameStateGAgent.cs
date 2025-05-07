@@ -67,8 +67,8 @@ namespace FootballCommentary.GAgents.GameState
         private const double FIELD_WIDTH = 1.0;
         private const double FIELD_HEIGHT = 1.0;
         private const double GOAL_WIDTH = 0.25; // Increased from 0.2 for wider goals
-        private const double PLAYER_SPEED = 0.035; // Increased from 0.03 for even faster player movement
-        private const double BALL_SPEED = 0.06; // Increased from 0.05 for faster ball movement
+        private const double PLAYER_SPEED = 0.07; // Increased from 0.035 for much faster player movement
+        private const double BALL_SPEED = 0.12; // Increased from 0.06 for much faster ball movement
         private const double GOAL_POST_X_TEAM_A = 0.05;
         private const double GOAL_POST_X_TEAM_B = 0.95;
         private const double PASSING_DISTANCE = 0.4; // Increased from 0.35 for longer passes
@@ -1671,30 +1671,42 @@ namespace FootballCommentary.GAgents.GameState
             foreach (var teammate in teamPlayers)
             {
                 bool teammateInAttackingHalf = (isTeamA && teammate.Position.X > 0.5) || 
-                                  (!isTeamA && teammate.Position.X < 0.5);
+                              (!isTeamA && teammate.Position.X < 0.5);
                 if (teammateInAttackingHalf)
                 {
                     teamPlayersInAttackingHalf++;
                 }
             }
             
-            // NEW: Define strict maximum forward positions by role for defensive positioning
+            // NEW: Define even stricter maximum forward positions by role for defensive positioning
             double maxForwardPosition;
             if (isDefender) {
-                maxForwardPosition = isTeamA ? 0.5 : 0.5; // Defenders at midfield max
+                // Defenders even more strictly constrained during defensive phases
+                maxForwardPosition = isTeamA ? 0.45 : 0.55; // Reduced from 0.5 to be more defensive
                 if (teamPlayersInAttackingHalf > 3) {
-                    maxForwardPosition = isTeamA ? 0.4 : 0.6; // More restrictive when too many forward
+                    maxForwardPosition = isTeamA ? 0.35 : 0.65; // Even more restrictive when too many forward
                 }
             } else if (isMidfielder) {
                 // Holding midfielders (6, 8) have different restrictions than attacking midfielders (7, 9)
                 if (playerNumber == 6 || playerNumber == 8) {
-                    maxForwardPosition = isTeamA ? 0.55 : 0.45; // Defensive midfielders
+                    maxForwardPosition = isTeamA ? 0.5 : 0.5; // Reduced from 0.55/0.45 to midfield line exactly
                 } else {
-                    maxForwardPosition = isTeamA ? 0.65 : 0.35; // Attacking midfielders
+                    maxForwardPosition = isTeamA ? 0.6 : 0.4; // Reduced from 0.65/0.35 to be more defensive
+                }
+            } else if (isForward) {
+                // Forwards much more restricted during defensive phases
+                maxForwardPosition = isTeamA ? 0.65 : 0.35; // Reduced from 0.8/0.2 to require significant retreat
+                
+                // Check if ball is in player's team's defensive third for forward retreat
+                bool ballInDefensiveZone = (isTeamA && targetPos.X < 0.3) || (!isTeamA && targetPos.X > 0.7);
+                
+                // If ball is in our defensive third, forwards must retreat even more
+                if (ballInDefensiveZone) {
+                    maxForwardPosition = isTeamA ? 0.55 : 0.45; // Forwards must retreat to near midfield
                 }
             } else {
-                // Forwards have more freedom but still limited
-                maxForwardPosition = isTeamA ? 0.8 : 0.2;
+                // Default for any other role
+                maxForwardPosition = isTeamA ? 0.5 : 0.5;
             }
             
             // NEW: Check if player needs to retreat from beyond max position FIRST
