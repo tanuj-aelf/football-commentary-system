@@ -1039,9 +1039,9 @@ namespace FootballCommentary.GAgents.GameState
                 // Update game time with more precise calculation
                 var realElapsed = DateTime.UtcNow - game.GameStartTime;
                 
-                // Scale real time: 1.5 real minutes = 90 game minutes
+                // Scale real time: 3.0 real minutes = 90 game minutes
                 // This ensures we're using the same time scale as the client
-                double scaleFactor = 90 / 1.5; // 90 minutes / 1.5 minutes = 60
+                double scaleFactor = 90 / 3.0; // 90 minutes / 3.0 minutes = 30
                 var scaledMinutes = realElapsed.TotalMinutes * scaleFactor;
                 
                 // Convert to TimeSpan (this will be what's displayed on screen)
@@ -1660,6 +1660,31 @@ namespace FootballCommentary.GAgents.GameState
             double dx = 0, dy = 0;
             Position targetPos = playerWithBall?.Position ?? game.Ball.Position;
             
+            // EMERGENCY RETREAT: Check for players very deep in opponent territory
+            bool playerDeepInOpponentTerritory = (isTeamA && player.Position.X > 0.9) || (!isTeamA && player.Position.X < 0.1);
+            if (playerDeepInOpponentTerritory && playerWithBall != null && !isGoalkeeper)
+            {
+                // Calculate emergency retreat position (closer to own half)
+                double emergencyRetreatX = isTeamA ? 0.6 : 0.4; // Pull back to a safe position
+                
+                // Very strong direct retreat force - much stronger than normal retreat
+                double emergencyRetreatStrength = 0.2; // Fixed strong value that doesn't depend on FORMATION_ADHERENCE
+                
+                // Direct vector toward retreat position
+                dx = (emergencyRetreatX - player.Position.X) * emergencyRetreatStrength;
+                
+                // Maintain Y position roughly similar to base position
+                dy = (basePosition.Y - player.Position.Y) * 0.05;
+                
+                _logger.LogInformation("EMERGENCY RETREAT: Player {PlayerId} ({Role}) in extreme position - applying strong retreat force",
+                    player.PlayerId, isDefender ? "Defender" : isMidfielder ? "Midfielder" : "Forward");
+                
+                // Apply movement with boundary checking
+                player.Position.X = Math.Clamp(player.Position.X + dx, 0, 1);
+                player.Position.Y = Math.Clamp(player.Position.Y + dy, 0, 1);
+                return; // Skip other calculations since emergency retreat takes absolute priority
+            }
+            
             // Add continuous natural movement using sine waves with player-specific phase
             double phase = playerNumber * 0.7;
             double naturalMovementX = Math.Sin(game.SimulationStep * 0.05 + phase + Math.PI) * 0.003;
@@ -1671,7 +1696,7 @@ namespace FootballCommentary.GAgents.GameState
             foreach (var teammate in teamPlayers)
             {
                 bool teammateInAttackingHalf = (isTeamA && teammate.Position.X > 0.5) || 
-                              (!isTeamA && teammate.Position.X < 0.5);
+                                  (!isTeamA && teammate.Position.X < 0.5);
                 if (teammateInAttackingHalf)
                 {
                     teamPlayersInAttackingHalf++;
@@ -1819,17 +1844,25 @@ namespace FootballCommentary.GAgents.GameState
                     retreatTargetX = isTeamA ? 0.35 : 0.65; // Deeper position for defenders
                 } else if (isMidfielder) {
                     // Midfielders retreat to midfield
-                    retreatStrength *= 1.5; // Increased from 1.3
+                    retreatStrength *= 2.5; // Increased from 1.5 to 2.5 to make midfielders retreat faster
                 } else if (isForward) {
                     // Even forwards retreat, but not as deep
-                    retreatStrength *= 1.2; // Increased from 1.1
+                    retreatStrength *= 2.0; // Increased from 1.2 to 2.0 to make forwards retreat faster
                 }
+                
+                // Increase retreat strength based on how far forward the player is
+                double forwardPositionFactor = isTeamA ? 
+                    Math.Min(Math.Max(0, (player.Position.X - 0.5) / 0.4), 1.0) : // For Team A: 0.5 to 0.9 maps to 0.0 to 1.0
+                    Math.Min(Math.Max(0, (0.5 - player.Position.X) / 0.4), 1.0);  // For Team B: 0.5 to 0.1 maps to 0.0 to 1.0
+                
+                // Apply additional retreat strength based on forward position (up to 75% more)
+                retreatStrength *= (1.0 + forwardPositionFactor * 0.75);
                 
                 // Strong pull back to own half
                 dx = (retreatTargetX - player.Position.X) * retreatStrength;
                 
                 // Maintain some of the Y position relative to base position
-                dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.0); // Increased from 1.5
+                dy = (basePosition.Y - player.Position.Y) * (FORMATION_ADHERENCE * 2.0);
                 
                 // Add natural movements and continue to the normal positioning logic with reduced effect
                 dx += naturalMovementX;
