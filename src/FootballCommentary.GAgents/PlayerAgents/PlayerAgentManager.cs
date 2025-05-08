@@ -200,6 +200,36 @@ namespace FootballCommentary.GAgents.PlayerAgents
             bool isAttacking = IsTeamAttacking(agent.IsTeamA, gameState);
             bool isTeamInPossession = IsTeamInPossession(agent.IsTeamA, gameState);
             
+            // NEW: Check if player needs to retreat (high priority for movement updates)
+            bool playerInOpponentHalf = (agent.IsTeamA && player.Position.X > 0.5) || 
+                                      (!agent.IsTeamA && player.Position.X < 0.5);
+            bool ballInOwnHalf = (agent.IsTeamA && gameState.Ball.Position.X < 0.5) || 
+                                 (!agent.IsTeamA && gameState.Ball.Position.X > 0.5);
+            bool opponentHasPossession = !string.IsNullOrEmpty(gameState.BallPossession) && 
+                                        ((agent.IsTeamA && gameState.BallPossession.StartsWith("TeamB")) || 
+                                         (!agent.IsTeamA && gameState.BallPossession.StartsWith("TeamA")));
+            
+            // CRITICAL PRIORITY: Forward or midfielder in opponent half while opponent has possession
+            if (playerInOpponentHalf && opponentHasPossession && 
+                (agent.Role == "Forward" || agent.Role == "Midfielder"))
+            {
+                score += 90; // Almost as high as having the ball - critical to update these players
+                
+                // Even higher priority if ball is in our defensive half - emergency retreat needed
+                if (ballInOwnHalf)
+                {
+                    score += 20;
+                    _logger.LogDebug("CRITICAL retreat required for {PlayerId} in opponent half while ball in own half", 
+                        player.PlayerId);
+                }
+            }
+            // HIGH PRIORITY: Any player in opponent half while ball is in our defensive half
+            else if (playerInOpponentHalf && ballInOwnHalf)
+            {
+                score += 70;
+                _logger.LogDebug("High priority retreat may be needed for {PlayerId}", player.PlayerId);
+            }
+            
             // Role-based situational priorities
             if (agent.Role == "Forward" && isAttacking)
             {

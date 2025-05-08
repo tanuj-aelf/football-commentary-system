@@ -210,6 +210,19 @@ Field orientation:
 - Your goal is at X={10}
 - Opponent goal is at X={11}
 
+POSITIONAL AWARENESS:
+- Defenders primarily operate in defensive third (X: 0.0-0.3 for Team A, X: 0.7-1.0 for Team B)
+- Midfielders control the middle third (X: 0.3-0.7 for both teams)
+- Forwards focus on attacking third (X: 0.7-1.0 for Team A, X: 0.0-0.3 for Team B)
+- Your current zone: {22}
+- Your ideal zone based on role: {23}
+
+DEFENSIVE TRANSITION PRIORITY: 
+- When your team loses possession, IMMEDIATELY retreat toward your defensive half
+- Forwards should drop to midfield (max X: 0.6 for Team A, min X: 0.4 for Team B)
+- Midfielders must recover central positions quickly to protect defensive shape
+- ALL players must track back when ball is in your defensive third
+
 Teammate positions:
 {12}
 
@@ -218,8 +231,11 @@ Opponent positions:
 
 {14}
 
-Based on your role as a {18} in a {19} formation, determine the EXTREMELY AGGRESSIVE and HIGH-RISK movement vector (dx, dy) 
-between -0.1 and 0.1. Take major risks to create dramatic goal-scoring opportunities!
+Based on your role as a {18} in a {19} formation, determine a FAST, HIGHLY DYNAMIC movement vector (dx, dy) 
+between -0.1 and 0.1. Movement is now MUCH FASTER in the simulation!
+
+SPATIAL ROLE INSTRUCTIONS:
+{24}
 
 {15}
 
@@ -228,40 +244,114 @@ Respond with JSON only: {{""dx"": value, ""dy"": value}}";
             // Add role-specific guidance
             string roleGuidance = Role switch 
             {
-                "Goalkeeper" => "Your primary role is to protect the goal. When you have possession, distribute the ball QUICKLY and INTELLIGENTLY to a teammate to start an attack. Look for safe, effective passes. Occasionally, if a clear opportunity arises and the team is pushing, you can support play further up, but prioritize safe distribution first.",
-                "Defender" => "Throw caution to the wind! Push AGGRESSIVELY forward into attack, overlap with your wingers, make daring runs through the center. Take risks with your tackles and intercepts - glory comes to the brave! However, be mindful of recovering your defensive shape and protecting your team's half, especially on turnovers.",
-                "Midfielder" => "Be the ultimate playmaker and risk-taker! Drive forward aggressively with the ball, attempt ambitious long-range shots, make daring through passes, and press opponents relentlessly. Your movement should constantly surprise and overwhelm the opposition.",
-                "Forward" => "Play like a superstar striker! Take EXTREME risks to get into scoring positions, make direct runs at defenders, shoot from ANY angle or distance when possible, and constantly look to break behind the defense. Creating spectacular goal-scoring chances is your ONLY priority!",
-                _ => "Play with maximum aggression, take huge risks, and create spectacular moments for your team!"
+                "Goalkeeper" => "GOALKEEPER POSITIONING: Stay within 0.15 of your goal line. Your primary role is to protect the goal. Position yourself strategically between the ball and the goal. When you have possession, distribute the ball QUICKLY and INTELLIGENTLY to a teammate to start an attack. Make excellent passing decisions considering the entire field layout.",
+                
+                "Defender" => "DEFENDER POSITIONING: Your home territory is the defensive third. Maintain the defensive line with other defenders. Push AGGRESSIVELY forward into attack when appropriate but be prepared to sprint back into defensive positions when possession changes. Watch gaps between defenders. Know when to step up for offside traps. Be aware of your center of gravity when defending 1v1.",
+                
+                "Midfielder" => "MIDFIELDER POSITIONING: Control the central areas of the pitch. Be constantly aware of space - find pockets between opponent lines. Make well-timed runs into attacking positions when appropriate. Cover defensively when teammates push forward. Balance the team's shape both horizontally and vertically. Create triangles with teammates for passing options.",
+                
+                "Forward" => "FORWARD POSITIONING: Focus on the attacking third but make intelligent movements in all zones. Time runs to break defensive lines. Create separation from defenders using quick directional changes. Find shooting positions with clear angles to goal. Make runs that create space for teammates. Position yourself between defenders to create indecision.",
+                
+                _ => "TACTICAL POSITIONING: Maintain excellent positioning relative to teammates and opponents. Be aware of space, time runs, and keep tactical shape."
             };
             
-            // Add formation role specific guidance
+            // Add formation role specific guidance with enhanced spatial awareness
             string formationRoleGuidance = "";
             if (!string.IsNullOrEmpty(FormationRole))
             {
                 formationRoleGuidance = FormationRole switch
                 {
-                    "Full Back" => "As a Full Back, make aggressive overlapping runs, push high up the field, provide width, and deliver crosses. Balance this with timely recovery to your defensive duties in your team's half.",
-                    "Center Back" => "Even as a Center Back, look for opportunities to step into midfield with the ball or join attacks. Your primary duty is to organize the defense and protect your goal area within your team's half.",
-                    "Wing Back" => "As a Wing Back, you should be constantly bombing forward, providing width in attack, and creating overloads. Be prepared to track back quickly to defend your flank in your team's half.",
-                    "Defensive Midfielder" => "Despite being a Defensive Midfielder, make late runs into the box and attempt shots. Your core role is to shield the defense, win the ball back in midfield, and maintain your position in your team's half when defending.",
-                    "Central Midfielder" => "As a Central Midfielder, control the tempo, make box-to-box runs, play risky through passes, and get into shooting positions. Remember to contribute defensively and hold your shape.",
-                    "Wide Midfielder" or "Winger" => "As a wide player, take on defenders 1v1, cut inside for shots, make runs behind the defense, and deliver dangerous crosses. Also, track back to support your full-back.",
-                    "Central Attacking Midfielder" => "As a #10, be the creative spark! Take risks with through balls, shoot from distance, and make late runs into the box. When possession is lost, apply pressure or recover your position.",
-                    "Striker" or "Center Forward" => "As the focal point of attack, constantly look for shooting opportunities, make runs behind defenders, and get into the box for crosses.",
-                    "Lone Striker" => "As a Lone Striker, you must be unpredictable! Drop deep to create, spin in behind, and always be in position to finish attacks.",
-                    "Wing Forward" => "From your wide forward position, cut inside for shots, make diagonal runs behind the defense, and link up with central attackers.",
-                    _ => "Play with intelligence according to your position, but take risks when opportunities arise!"
+                    "Full Back" => "As a Full Back, maintain width during build-up (stay within 0.15 of touchline). Make overlapping runs along the flanks to support attacks. Time forward runs to coincide with midfielder possession. Recover defensively at high speed when possession is lost - sprint recovery paths should be diagonal toward your goal.",
+                    
+                    "Center Back" => "As a Center Back, be the defensive anchor between 0-0.3 (Team A) or 0.7-1.0 (Team B). Control the space between defense and midfield. Step forward to intercept when appropriate but maintain defensive depth. Position yourself to see all attackers and adjust based on their movements. Create clean passing angles for building play from the back.",
+                    
+                    "Wing Back" => "As a Wing Back, own your entire flank from defense to attack. Maintain width during build-up (0.8-1.0 or 0.0-0.2 on Y-axis). Time your forward runs to create overloads. Recognize when to invert into midfield to create numerical advantages. Track back with high-intensity sprints when possession changes.",
+                    
+                    "Defensive Midfielder" => "As a Defensive Midfielder, control the crucial space between defense and midfield. Screen passing lanes to opposition attackers. Position yourself to intercept counters early. Offer passing support at specific angles from defenders. Maintain central defensive shape. Create 'round the corner' passing options for teammates under pressure.",
+                    
+                    "Central Midfielder" => "As a Central Midfielder, control the tempo from the engine room. Find space between opponent lines. Constantly scan and adjust position based on ball location. Create passing triangles with teammates. Time forward runs to arrive late in the box. Create overloads in key areas by shifting position intelligently.",
+                    
+                    "Wide Midfielder" or "Winger" => "As a wide player, maintain optimal width (0.8-1.0 or 0.0-0.2 on Y-axis) during build-up. Create 1v1 isolation opportunities against defenders. Time diagonal runs behind the defense to stretch opponents. Position yourself at the back post for crosses from the opposite flank. Tuck inside to create overloads when appropriate.",
+                    
+                    "Central Attacking Midfielder" => "As a #10, find and operate in pockets of space between opposition midfield and defense. Position yourself to receive between lines. Make late runs into the box timed with wide player crosses. Create space for forwards with your movement. Adjust position to offer passing lanes to teammates in tight spaces.",
+                    
+                    "Striker" or "Center Forward" => "As the focal point of attack, alternate between stretching the defense with runs behind and dropping to link play. Position yourself between and behind center backs to create confusion. Time runs to exploit gaps between defenders. Position your body to protect the ball with your back to goal. Create shooting angles through intelligent movement.",
+                    
+                    "Lone Striker" => "As a Lone Striker, master varied movements to occupy multiple defenders. Alternate between stretching the defense with runs and dropping deep to link play. Time your movements to create space for midfield runners. Position yourself to receive with back to goal when needed. Create separation from defenders using quick changes of direction.",
+                    
+                    "Wing Forward" => "As a Wing Forward, maintain high and wide positions to stretch defenses. Time diagonal runs behind fullbacks. Position yourself between fullback and centerback to create decision problems. Create separation using quick accelerations and changes of direction. Adjust position to attack the back post when crosses come from opposite side.",
+                    
+                    _ => "Maintain excellent positional awareness for your role. Adapt your position dynamically based on ball location, teammate movements and opponent positions."
                 };
                 
                 roleGuidance += "\n\n" + formationRoleGuidance;
             }
             
-            // Add possession-specific instructions
-            string possessionGuidance = hasPossession
-                ? "You currently have the ball - be EXTREMELY AGGRESSIVE! Look for the most direct path to goal, take on multiple defenders, attempt audacious shots from distance, or make high-risk creative passes. Fans want to see SPECTACULAR attacking play and GOALS!"
-                : "You don't have the ball - be EXTREMELY PROACTIVE! Make aggressive runs into dangerous spaces, position yourself for shooting opportunities, press opponents with maximum intensity. Take major risks to create goal-scoring opportunities or win back possession!";
+            // Add possession-specific instructions with enhanced retreat logic
+            string possessionGuidance = "";
+            bool opponentHasPossession = !string.IsNullOrEmpty(gameState.BallPossession) && 
+                                     ((IsTeamA && gameState.BallPossession.StartsWith("TeamB")) || 
+                                      (!IsTeamA && gameState.BallPossession.StartsWith("TeamA")));
+            bool ballInOwnHalf = (IsTeamA && gameState.Ball.Position.X < 0.5) || 
+                                 (!IsTeamA && gameState.Ball.Position.X > 0.5);
+            bool playerInOpponentHalf = (IsTeamA && currentPosition.X > 0.5) || 
+                                       (!IsTeamA && currentPosition.X < 0.5);
+
+            if (hasPossession) {
+                possessionGuidance = "You currently have the ball - make DYNAMIC, PURPOSEFUL movements! Move at HIGH SPEED with intention. Look for the most direct path to goal, take on defenders with quick direction changes, attempt shots from promising positions, or make creative passes. Your movement should be FAST and DECISIVE!";
+            }
+            else if (opponentHasPossession) {
+                // Enhanced retreat logic when opponent has the ball
+                if (playerInOpponentHalf) {
+                    possessionGuidance = "URGENT DEFENSIVE TRANSITION! Opponent has possession while you're in their half. Make an IMMEDIATE defensive recovery run toward your own half. Your PRIMARY objective is to regain defensive shape.";
+                    
+                    if (ballInOwnHalf) {
+                        possessionGuidance += " Ball is in your defensive half - this is CRITICAL! Sprint back to defensive position at maximum speed!";
+                    }
+                    
+                    // Role-specific retreat instructions
+                    if (Role == "Forward") {
+                        possessionGuidance += " As a forward, retreat to at least the halfway line to provide defensive support.";
+                    }
+                    else if (Role == "Midfielder") {
+                        possessionGuidance += " As a midfielder, recover central position immediately to shield your defensive line.";
+                    }
+                }
+                else if (ballInOwnHalf) {
+                    possessionGuidance = "DEFENSIVE EMERGENCY! Opponent has possession in your half. Take up compact defensive position, close passing lanes, and support teammates. Your movement must prioritize defensive solidarity over attacking options.";
+                }
+                else {
+                    possessionGuidance = "Opponent has possession, but not in your half yet. Maintain defensive shape, track offensive players, and prepare to drop deeper if opponent advances. Stay connected with teammates to maintain compact defensive structure.";
+                }
+            }
+            else {
+                // Neither team has clear possession
+                possessionGuidance = "Ball is loose - be PROACTIVE! Position yourself to either win possession or quickly transition to defensive shape if opponent gains the ball. Your movement should anticipate the next phase of play!";
                 
+                if (playerInOpponentHalf && ballInOwnHalf) {
+                    possessionGuidance += " WARNING: You're advanced while the ball is in your defensive half - strongly consider retreating to provide defensive support!";
+                }
+            }
+
+            // Get tactical nuance
+            string tacticalNuance = "";
+            if (Role == "Midfielder" || Role == "Forward")
+            {
+                if (opponentHasPossession && ballInOwnHalf) {
+                    tacticalNuance = "The opponent has possession in your team's half. Prioritize regaining defensive shape and supporting your defenders. Balance aggression with tactical discipline.";
+                }
+                else if (!opponentHasPossession && ballInOwnHalf && hasPossession) {
+                     tacticalNuance = "Your team has possession deep in your own half. Focus on secure build-up play and creating safe passing options. Extreme forward runs might be too risky now.";
+                }
+                else if (!opponentHasPossession && ballInOwnHalf && !hasPossession) {
+                     tacticalNuance = "The ball is loose in your team's half, or a teammate deep has it. Position yourself to support build-up or transition quickly if possession is won. Avoid overcommitting forward.";
+                }
+            }
+            if (!string.IsNullOrEmpty(tacticalNuance))
+            {
+                possessionGuidance += "\n\nTACTICAL SITUATION: " + tacticalNuance;
+            }
+
             // Get possession description
             string possession = DeterminePossessionDescription(gameState);
             
@@ -311,30 +401,12 @@ Respond with JSON only: {{""dx"": value, ""dy"": value}}";
             // Get formation name for display
             string formationName = GetFormationDisplayName(CurrentFormation);
 
-            // Conditional tactical nuance for prompt
-            string tacticalNuance = "";
-            bool opponentHasPossession = !string.IsNullOrEmpty(gameState.BallPossession) && 
-                                     ((IsTeamA && gameState.BallPossession.StartsWith("TeamB")) || 
-                                      (!IsTeamA && gameState.BallPossession.StartsWith("TeamA")));
-            bool ballInOwnHalf = (IsTeamA && gameState.Ball.Position.X < 0.5) || 
-                                 (!IsTeamA && gameState.Ball.Position.X > 0.5);
+            // Determine current zone and ideal zone
+            string currentZone = DetermineCurrentZone(currentPosition, IsTeamA);
+            string idealZone = DetermineIdealZoneForRole(Role, IsTeamA);
 
-            if (Role == "Midfielder" || Role == "Forward")
-            {
-                if (opponentHasPossession && ballInOwnHalf) {
-                    tacticalNuance = "The opponent has possession in your team's half. Prioritize regaining defensive shape and supporting your defenders. Balance aggression with tactical discipline.";
-                }
-                else if (!opponentHasPossession && ballInOwnHalf && hasPossession) {
-                     tacticalNuance = "Your team has possession deep in your own half. Focus on secure build-up play and creating safe passing options. Extreme forward runs might be too risky now.";
-                }
-                else if (!opponentHasPossession && ballInOwnHalf && !hasPossession) {
-                     tacticalNuance = "The ball is loose in your team's half, or a teammate deep has it. Position yourself to support build-up or transition quickly if possession is won. Avoid overcommitting forward.";
-                }
-            }
-            if (!string.IsNullOrEmpty(tacticalNuance))
-            {
-                possessionGuidance += "\n\nTACTICAL SITUATION: " + tacticalNuance;
-            }
+            // Special spatial instructions based on role and formation 
+            string spatialInstructions = GetSpatialInstructionsForRole(Role, FormationRole, IsTeamA, CurrentFormation);
 
             // Format the prompt with player data
             return string.Format(
@@ -360,8 +432,156 @@ Respond with JSON only: {{""dx"": value, ""dy"": value}}";
                 FormationRole, // {18}
                 formationName,  // {19}
                 BasePosition.X, // {20}
-                BasePosition.Y  // {21}
+                BasePosition.Y,  // {21}
+                currentZone, // {22}
+                idealZone, // {23}
+                spatialInstructions // {24}
             );
+        }
+        
+        private string DetermineCurrentZone(Position position, bool isTeamA)
+        {
+            // Determine the current third (defensive, middle, attacking) based on X position
+            string thirdX;
+            if ((isTeamA && position.X < 0.3) || (!isTeamA && position.X > 0.7))
+            {
+                thirdX = "Defensive Third";
+            }
+            else if ((isTeamA && position.X > 0.7) || (!isTeamA && position.X < 0.3))
+            {
+                thirdX = "Attacking Third";
+            }
+            else
+            {
+                thirdX = "Middle Third";
+            }
+
+            // Determine vertical zone (left, center, right) based on Y position
+            string zoneY;
+            if (position.Y < 0.3)
+            {
+                zoneY = "Left Flank";
+            }
+            else if (position.Y > 0.7)
+            {
+                zoneY = "Right Flank";
+            }
+            else
+            {
+                zoneY = "Central Area";
+            }
+
+            return $"{thirdX}, {zoneY}";
+        }
+
+        private string DetermineIdealZoneForRole(string role, bool isTeamA)
+        {
+            switch (role)
+            {
+                case "Goalkeeper":
+                    return isTeamA ? "Defensive Third (X: 0.0-0.1), Central Area" : "Defensive Third (X: 0.9-1.0), Central Area";
+                case "Defender":
+                    return isTeamA ? "Defensive Third (X: 0.1-0.3), varies by position" : "Defensive Third (X: 0.7-0.9), varies by position";
+                case "Midfielder":
+                    return "Middle Third (X: 0.3-0.7), varies by specific midfield role";
+                case "Forward":
+                    return isTeamA ? "Attacking Third (X: 0.7-1.0), varies by forward role" : "Attacking Third (X: 0.0-0.3), varies by forward role";
+                default:
+                    return "Varies based on specific role";
+            }
+        }
+
+        private string GetSpatialInstructionsForRole(string role, string formationRole, bool isTeamA, TeamFormation formation)
+        {
+            string baseInstructions = "";
+            
+            // Add formation-specific positioning for each role
+            switch (formation)
+            {
+                case TeamFormation.Formation_4_4_2:
+                    if (role == "Midfielder" && (formationRole == "Central Midfielder" || formationRole.Contains("Central")))
+                    {
+                        baseInstructions = "In the 4-4-2, central midfielders must maintain compact horizontal spacing (no more than 0.15 apart in Y-axis). Maintain a central position to provide defensive cover and passing options. When possession is lost, your first movement must be to recover centrally.";
+                    }
+                    else if (role == "Forward")
+                    {
+                        baseInstructions = "In the 4-4-2, forwards should work as a pair - one can drop deeper while the other stretches the defense. Maintain approximately 0.2 separation in the Y-axis for optimal spacing. When team loses possession, immediately drop back toward midfield to apply pressure and prevent easy progression.";
+                    }
+                    break;
+                    
+                case TeamFormation.Formation_4_3_3:
+                    if (role == "Forward" && formationRole == "Wing Forward")
+                    {
+                        baseInstructions = "In the 4-3-3, wing forwards should maintain high and wide positions (Y: 0.15-0.25 or 0.75-0.85) to stretch the defense when in possession. Tuck inside to create compact defensive shape when defending. When possession is lost, immediately track back along your flank.";
+                    }
+                    else if (role == "Midfielder")
+                    {
+                        baseInstructions = "In the 4-3-3, midfielders form a triangle - with defensive midfielder behind and two ahead. Maintain triangular spacing for passing options. On losing possession, the entire midfield must quickly recover position to prevent counter-attacks.";
+                    }
+                    break;
+                    
+                case TeamFormation.Formation_4_2_3_1:
+                    if (role == "Midfielder" && formationRole == "Defensive Midfielder")
+                    {
+                        baseInstructions = "In the 4-2-3-1, defensive midfielders work as a double pivot with balanced spacing. One can step forward while the other covers, but never both forward simultaneously. Your defensive positioning is critical - always prioritize defensive shape over attacking opportunities.";
+                    }
+                    else if (role == "Midfielder" && formationRole == "Central Attacking Midfielder")
+                    {
+                        baseInstructions = "In the 4-2-3-1, as the #10, find and operate in spaces between lines. Position yourself centrally but float to either side based on where space opens up. When possession is lost, you must immediately drop to connect with the defensive midfielders.";
+                    }
+                    break;
+                    
+                case TeamFormation.Formation_3_5_2:
+                    if (formationRole == "Wing Back")
+                    {
+                        baseInstructions = "In the 3-5-2, wing backs must provide width in attack and defense across the ENTIRE flank. Your vertical positioning should be balanced with the opposite wing back - if one advances, the other should be more conservative. Your recovery sprints after possession loss are CRITICAL.";
+                    }
+                    else if (role == "Defender" && formationRole == "Center Back")
+                    {
+                        baseInstructions = "In the 3-5-2, the central defender of the three should hold position while the wide center backs can step into midfield when appropriate. Maintain triangular spacing between the three defenders. Never all push forward simultaneously.";
+                    }
+                    break;
+                    
+                default:
+                    // No specific formation instructions
+                    break;
+            }
+            
+            // Add universal spatial instructions for each role
+            string universalInstructions = role switch
+            {
+                "Goalkeeper" => "As goalkeeper, position yourself on an imaginary arc between the goalposts, adjusting based on ball position. Come off your line decisively for through balls but maintain goal coverage.",
+                
+                "Defender" => "As a defender, position yourself to see both the ball and attacking players simultaneously. Maintain the defensive line with teammates, stepping up in unison for offside traps. Cover space behind teammates who step forward. When possession changes, your first priority is to reestablish defensive shape.",
+                
+                "Midfielder" => "As a midfielder, constantly scan and adjust position to create passing triangles with teammates. Find pockets of space between opponent lines. Cover defensively when teammates push forward to maintain team balance. When possession is lost, your FIRST MOVEMENT must be defensive recovery - never remain high up the pitch when the opponent counters.",
+                
+                "Forward" => "As a forward, make diagonal runs that start from outside defender's vision. Use quick changes of pace and direction to create separation. Position yourself between defenders to force them to make decisions. During defensive phases, drop back to at least midfield position (X: 0.5) to provide an outlet and defensive support.",
+                
+                _ => "Maintain optimal spacing with teammates. Adjust position constantly based on ball location and teammates' movements."
+            };
+            
+            // Add defensive transition guidance for EVERY role
+            string defensiveTransitionGuidance = role switch
+            {
+                "Goalkeeper" => "When possession is lost, immediately assess if you need to take a deeper position to prepare for shots or through balls.",
+                
+                "Defender" => "When possession is lost, your first priority is to reestablish defensive shape and track runners. Never get caught forward during opposition counter-attacks.",
+                
+                "Midfielder" => "When possession is lost, immediately transition to defensive shape. If you're in the opponent's half, sprint back to at least the midfield line. This defensive recovery is MORE IMPORTANT than attacking positioning.",
+                
+                "Forward" => "When possession is lost, you must drop back to support team defense, especially if you're in the opponent's half. Your defensive recovery run should target the midfield line (X: 0.5) as a minimum retreat position.",
+                
+                _ => "When possession is lost, prioritize defensive recovery position over attacking opportunities."
+            };
+            
+            // Combine instructions
+            if (!string.IsNullOrEmpty(baseInstructions))
+            {
+                return baseInstructions + "\n\n" + universalInstructions + "\n\n" + defensiveTransitionGuidance;
+            }
+            
+            return universalInstructions + "\n\n" + defensiveTransitionGuidance;
         }
         
         // Helper to get a readable formation name

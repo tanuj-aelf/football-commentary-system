@@ -122,7 +122,15 @@ function preventPlayerSwarm(state) {
                 if (player.position.x > 0.55 && result.status !== 4) { // Not during goal celebration
                     // Gently nudge player back to their side (unless they're attacking)
                     if (!isHomeTeamPossession || distance > 0.2) {
-                        player.position.x = Math.max(player.position.x - 0.01, 0.45);
+                        // Check if player is deep in opponent half - apply stronger correction
+                        if (player.position.x > 0.8) {
+                            // Strong correction for players very deep in opponent territory
+                            const correctionFactor = 0.03 + (player.position.x - 0.8) * 0.1; // Progressively stronger the deeper they are
+                            player.position.x = Math.max(player.position.x - correctionFactor, 0.45);
+                        } else {
+                            // Normal gentle nudge
+                            player.position.x = Math.max(player.position.x - 0.01, 0.45);
+                        }
                     }
                 }
                 
@@ -145,7 +153,15 @@ function preventPlayerSwarm(state) {
                 if (player.position.x < 0.45 && result.status !== 4) { // Not during goal celebration
                     // Gently nudge player back to their side (unless they're attacking)
                     if (!isAwayTeamPossession || distance > 0.2) {
-                        player.position.x = Math.min(player.position.x + 0.01, 0.55);
+                        // Check if player is deep in opponent half - apply stronger correction
+                        if (player.position.x < 0.2) {
+                            // Strong correction for players very deep in opponent territory
+                            const correctionFactor = 0.03 + (0.2 - player.position.x) * 0.1; // Progressively stronger the deeper they are
+                            player.position.x = Math.min(player.position.x + correctionFactor, 0.55);
+                        } else {
+                            // Normal gentle nudge
+                            player.position.x = Math.min(player.position.x + 0.01, 0.55);
+                        }
                     }
                 }
                 
