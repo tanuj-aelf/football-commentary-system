@@ -3,7 +3,7 @@
 Real-time AI Football Game Master and Commentary System built with Orleans, SignalR, and the Aevatar Framework.
 
 ## Demo
-https://github.com/user-attachments/assets/469d7b79-406d-4436-a0a8-3281e22b0967
+https://github.com/user-attachments/assets/0c1dbcc7-22cd-4ef3-94b0-6608cb0f5b95
 
 ## Overview
 
